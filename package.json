@@ -1,0 +1,22 @@
+{
+  "name": "airbridge-mac-android",
+  "version": "1.0.0",
+  "description": "Simple, seamless web app to connect macOS and Android over local Wi-Fi",
+  "scripts": {
+    "setup": "cd server && npm install && cd ../frontend && npm install && npm run build",
+    "build": "cd frontend && npm run build",
+    "start": "node server/index.js",
+    "dev": "node server/index.js"
+  },
+  "keywords": [
+    "macos",
+    "android",
+    "file-transfer",
+    "airdrop",
+    "clipboard",
+    "continuity"
+  ],
+  "author": "",
+  "license": "MIT"
+}
+
