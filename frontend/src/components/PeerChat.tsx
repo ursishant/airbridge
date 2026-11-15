@@ -154,7 +154,7 @@ export const PeerChat: React.FC<PeerChatProps> = ({
                   {peerDisplayName}
                 </h3>
                 <p className="text-xs text-[#64748B] dark:text-[#94A3B8] font-mono truncate mt-0.5">
-                  {peerDevice ? `${peerDevice.ip || '127.0.0.1'} • ${peerDevice.os}` : 'Awaiting Connection'}
+                  {peerDevice ? `${peerDevice.os} • Direct LAN P2P` : 'Awaiting Connection'}
                 </p>
                 {peerDevice?.battery && (
                   <div className="mt-1">

@@ -128,7 +128,7 @@ export const DeviceRemoteTools: React.FC<DeviceRemoteToolsProps> = ({
                       {device.name}
                     </p>
                     <p className="text-[10px] text-[#64748B] dark:text-[#94A3B8] font-mono truncate">
-                      {device.os} • {device.ip}
+                      {device.os} • Direct LAN
                     </p>
                   </div>
                 </div>

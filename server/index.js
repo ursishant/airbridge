@@ -33,6 +33,18 @@ if (!fs.existsSync(UPLOADS_DIR)) {
   fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 }
 
+function getSanitizedHostname() {
+  const raw = os.hostname() || 'AirBridge-Host';
+  return raw.replace(/^[a-zA-Z0-9]+['’s_-]+MacBook/i, 'MacBook')
+            .replace(/^[a-zA-Z0-9]+['’s_-]+PC/i, 'Windows-PC')
+            .replace(/^[a-zA-Z0-9]+['’s_-]+Laptop/i, 'Laptop')
+            .replace(/Ishants?[-_]?/gi, '');
+}
+
+function getSanitizedDownloadsDir() {
+  return UPLOADS_DIR.replace(os.homedir(), '~');
+}
+
 // IP detection helper with full Windows adapter & virtual interface filtering
 function getNetworkIps() {
   const interfaces = os.networkInterfaces();
@@ -73,6 +85,10 @@ function getNetworkIps() {
 
   if (preferredIp === 'localhost' && validIps.length > 0) {
     preferredIp = validIps[0].address;
+  }
+
+  if (process.env.AIRBRIDGE_DEMO_IP) {
+    preferredIp = process.env.AIRBRIDGE_DEMO_IP;
   }
 
   return {
@@ -488,8 +504,8 @@ wss.on('connection', (ws, req) => {
       chatHistory: appState.chatHistory.slice(-200),
       clipboardHistory: appState.clipboardHistory.slice(-50),
       serverInfo: {
-        downloadsDir: UPLOADS_DIR,
-        hostname: os.hostname(),
+        downloadsDir: getSanitizedDownloadsDir(),
+        hostname: getSanitizedHostname(),
         platform: process.platform,
         isWindows,
         isMac,
@@ -735,14 +751,14 @@ app.get('/api/info', (req, res) => {
     allIps: net.allIps,
     port: PORT,
     url: `http://${net.primaryIp}:${PORT}`,
-    hostname: os.hostname(),
+    hostname: getSanitizedHostname(),
     platform: process.platform,
     os: osDisplay,
     isWindows,
     isMac,
     isLinux,
     isHost,
-    downloadsDir: UPLOADS_DIR,
+    downloadsDir: getSanitizedDownloadsDir(),
     connectedCount: getUniqueDevices().length,
     officeSecurity: {
       enabled: Boolean(appState.officeSecurity?.enabled),

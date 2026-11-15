@@ -20,9 +20,9 @@
 |:---:|:---:|
 | ![Dark Mode Dashboard](docs/screenshots/desktop-dark.png) | ![Light Mode Dashboard](docs/screenshots/desktop-light.png) |
 
-| Direct LAN Peer Chat | Website-Grade Confirmation Modals |
+| Direct LAN Peer Chat | Office Wi-Fi Security & PIN Shield |
 |:---:|:---:|
-| ![Peer Chat](docs/screenshots/chat-dark.png) | ![Custom Confirmation Modal](docs/screenshots/confirm-modal-dark.png) |
+| ![Peer Chat](docs/screenshots/chat-dark.png) | ![Office Wi-Fi Security Shield](docs/screenshots/office-security-modal.png) |
 
 </div>
 
@@ -68,6 +68,18 @@ AirBridge solves this friction. It runs a native host daemon on Windows, macOS, 
 - **Find My Phone**: Trigger haptic vibration patterns on connected Android devices.
 - **Host Ping Alert**: Send an acoustic chime to your host computer (using Windows console tone or macOS alert).
 - **Battery Telemetry**: Real-time host battery reporting via Windows CIM (`Win32_Battery`) and macOS `pmset`.
+
+---
+
+## Mobile Experience (Android & iOS)
+
+<div align="center">
+
+| Mobile Dark Mode | Mobile Light Mode |
+|:---:|:---:|
+| <img src="docs/screenshots/mobile-dark.png" width="280" alt="Mobile Dark View" /> | <img src="docs/screenshots/mobile-light.png" width="280" alt="Mobile Light View" /> |
+
+</div>
 
 ---
 

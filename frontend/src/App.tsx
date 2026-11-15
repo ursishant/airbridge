@@ -369,7 +369,7 @@ export const App: React.FC = () => {
                 {deviceName}
               </h4>
               <p className="text-xs text-[#64748B] dark:text-[#94A3B8] font-mono truncate mt-0.5">
-                {serverInfo?.primaryIp || '127.0.0.1'} • {serverInfo?.os || (isWindows ? 'Windows' : isMac ? 'macOS' : 'Host')}
+                Local Host • {serverInfo?.os || (isWindows ? 'Windows' : isMac ? 'macOS' : 'Host')}
               </p>
             </div>
           </div>
@@ -392,7 +392,7 @@ export const App: React.FC = () => {
                 {peerDevice ? peerDevice.name : cleanDevices.length > 1 ? `${cleanDevices.length - 1} Office Peers` : 'Tap to Pair Device'}
               </h4>
               <p className="text-xs text-[#64748B] dark:text-[#94A3B8] font-mono truncate mt-0.5">
-                {peerDevice ? `${peerDevice.ip} • ${peerDevice.os}` : cleanDevices.length > 1 ? 'Windows, Mac, Phone • Direct' : 'Scan QR code to connect'}
+                {peerDevice ? `${peerDevice.os} • Direct LAN` : cleanDevices.length > 1 ? 'Windows, Mac, Phone • Direct' : 'Scan QR code to connect'}
               </p>
             </div>
           </div>
@@ -674,7 +674,7 @@ export const App: React.FC = () => {
                           </div>
                           <div className="min-w-0">
                             <p className="font-display text-xs font-bold text-[#0F1115] dark:text-white truncate">{dev.name}</p>
-                            <p className="text-[10px] text-[#64748B] dark:text-[#94A3B8] font-mono truncate">{dev.os} • {dev.ip}</p>
+                            <p className="text-[10px] text-[#64748B] dark:text-[#94A3B8] font-mono truncate">{dev.os} • Direct LAN</p>
                           </div>
                         </div>
                         {dev.battery ? (

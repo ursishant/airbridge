@@ -259,7 +259,7 @@ export const FileTransfer: React.FC<FileTransferProps> = ({
               </span>
             </div>
             <p className="text-xs text-[#64748B] dark:text-[#94A3B8] mt-0.5">
-              Direct Wi-Fi storage in <code className="font-mono text-[#0F1115] dark:text-white bg-black/[0.04] dark:bg-white/10 px-1.5 py-0.5 rounded text-[11px]">{serverInfo?.downloadsDir || '~/Downloads/AirBridge'}</code>
+              Direct Wi-Fi storage in <code className="font-mono text-[#0F1115] dark:text-white bg-black/[0.04] dark:bg-white/10 px-1.5 py-0.5 rounded text-[11px]">{(serverInfo?.downloadsDir || '~/Downloads/AirBridge').replace(/^\/Users\/[^/]+/, '~').replace(/^[a-zA-Z]:\\Users\\[^\\]+/i, '~')}</code>
             </p>
           </div>
         </div>

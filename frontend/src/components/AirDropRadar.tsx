@@ -196,7 +196,7 @@ export const AirDropRadar: React.FC<AirDropRadarProps> = ({
                   </span>
                 </div>
                 <p className="text-xs text-[#64748B] dark:text-[#94A3B8] font-mono truncate mt-0.5">
-                  {myDevice.ip || '127.0.0.1'} • {myDevice.os}
+                  Local Host • {myDevice.os}
                 </p>
               </div>
             </div>
@@ -248,7 +248,7 @@ export const AirDropRadar: React.FC<AirDropRadarProps> = ({
                       </span>
                     </div>
                     <p className="text-xs text-[#64748B] dark:text-[#94A3B8] font-mono truncate mt-0.5">
-                      {otherDevices.length === 1 ? `${otherDevices[0].ip} • P2P Active` : 'Windows, Mac, Phone'}
+                      {otherDevices.length === 1 ? `${otherDevices[0].os} • P2P Active` : 'Windows, Mac, Phone'}
                     </p>
                   </div>
                   <button
@@ -304,7 +304,7 @@ export const AirDropRadar: React.FC<AirDropRadarProps> = ({
                         {dev.name}
                       </p>
                       <p className="text-[10px] font-mono text-[#64748B] dark:text-[#94A3B8]">
-                        {dev.os} • {dev.ip}
+                        {dev.os} • Direct LAN
                       </p>
                     </div>
                     {dev.battery && (
