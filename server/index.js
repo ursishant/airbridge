@@ -52,6 +52,7 @@ function getNetworkIps() {
           interface: name,
           address: iface.address,
           isWifi,
+          isEthernet,
           isVirtual,
         });
 
@@ -60,7 +61,7 @@ function getNetworkIps() {
         // 2. en0 on macOS or Wi-Fi on Windows
         // 3. Standard private LAN subnets (192.168.x.x, 10.x.x.x, 172.16-31.x.x)
         if (!isVirtual) {
-          if (preferredIp === 'localhost' || name === 'en0' || lowerName.includes('wi-fi')) {
+          if (preferredIp === 'localhost' || name === 'en0' || isWifi || isEthernet) {
             preferredIp = iface.address;
           } else if (/^(192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[01])\.)/.test(iface.address) && preferredIp === 'localhost') {
             preferredIp = iface.address;
@@ -259,7 +260,7 @@ let appState = {
   knownDevices: [],
   officeSecurity: {
     enabled: false,
-    pin: '',
+    pin: String(Math.floor(1000 + Math.random() * 9000)),
   },
 };
 
@@ -272,10 +273,7 @@ try {
     if (Array.isArray(parsed.clipboardHistory)) appState.clipboardHistory = parsed.clipboardHistory;
     if (Array.isArray(parsed.knownDevices)) appState.knownDevices = parsed.knownDevices;
     if (parsed.officeSecurity && typeof parsed.officeSecurity === 'object') {
-      appState.officeSecurity = {
-        enabled: Boolean(parsed.officeSecurity.enabled),
-        pin: String(parsed.officeSecurity.pin || '').trim(),
-      };
+      appState.officeSecurity.enabled = Boolean(parsed.officeSecurity.enabled);
     }
     console.log(`[Storage] Loaded persistent state: ${appState.chatHistory.length} chats, ${appState.clipboardHistory.length} clipboard items.`);
   }
@@ -285,7 +283,15 @@ try {
 
 function saveAppState() {
   try {
-    fs.writeFileSync(STATE_FILE, JSON.stringify(appState, null, 2), 'utf8');
+    const serialized = JSON.stringify({
+      chatHistory: Array.isArray(appState.chatHistory) ? appState.chatHistory : [],
+      clipboardHistory: Array.isArray(appState.clipboardHistory) ? appState.clipboardHistory : [],
+      knownDevices: Array.isArray(appState.knownDevices) ? appState.knownDevices : [],
+      officeSecurity: {
+        enabled: Boolean(appState.officeSecurity?.enabled),
+      },
+    }, null, 2);
+    fs.writeFileSync(STATE_FILE, serialized, 'utf8');
   } catch (e) {
     console.error('Error saving persistent state:', e.message);
   }
@@ -1145,16 +1151,13 @@ app.post('/api/files/delete', apiLimiter, handleDeleteFileRequest);
 
 // Reveal file or directory in Windows File Explorer, macOS Finder, or Linux File Manager
 const handleRevealInFileManager = (req, res) => {
-  const { filename } = req.body;
   const ROOT = path.resolve(UPLOADS_DIR);
-  let targetPath = ROOT;
+  const rawFilename = (req.body && typeof req.body.filename === 'string') ? req.body.filename : '';
+  const cleanFilename = path.normalize(rawFilename).replace(/^(\.\.[\/\\])+/, '');
+  const targetPath = cleanFilename ? path.resolve(ROOT, cleanFilename) : ROOT;
 
-  if (filename && typeof filename === 'string') {
-    const resolved = path.resolve(ROOT, filename);
-    if (resolved !== ROOT && !resolved.startsWith(ROOT + path.sep)) {
-      return res.status(403).json({ error: 'Access denied: Invalid path' });
-    }
-    targetPath = resolved;
+  if (!targetPath.startsWith(ROOT)) {
+    return res.status(403).json({ error: 'Access denied: Invalid path' });
   }
 
   if (!fs.existsSync(targetPath)) {
