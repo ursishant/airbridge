@@ -297,22 +297,56 @@ function saveAppState() {
   }
 }
 
+// Function to resolve all local IP addresses of the host machine
+function getHostIpSet() {
+  const hostIps = new Set([
+    '127.0.0.1',
+    '::1',
+    'localhost',
+    'local',
+    '1',
+    '0.0.0.0',
+    '::',
+  ]);
+  try {
+    const interfaces = os.networkInterfaces();
+    for (const name of Object.keys(interfaces)) {
+      for (const iface of interfaces[name]) {
+        if (iface.address) {
+          hostIps.add(iface.address.toLowerCase());
+        }
+      }
+    }
+  } catch (e) {}
+  return hostIps;
+}
+
+function isHostRequest(req) {
+  const rawRemote = (req.socket.remoteAddress || '').toLowerCase();
+  const cleanRemote = rawRemote.replace(/^::ffff:/, '');
+  const hostIps = getHostIpSet();
+
+  if (hostIps.has(cleanRemote) || hostIps.has(rawRemote)) {
+    return true;
+  }
+  if (req.hostname === 'localhost' || req.hostname === '127.0.0.1') {
+    return true;
+  }
+  return false;
+}
+
 // Office Room Security Authorization helpers
 function isAuthorizedRequest(req) {
   if (!appState.officeSecurity || !appState.officeSecurity.enabled) {
     return true;
   }
 
-  const remote = (req.socket.remoteAddress || '').replace(/^.*:/, '');
-  const isLocal = remote === '127.0.0.1' || 
-                  remote === 'localhost' || 
-                  remote === 'local' || 
-                  remote === '1' ||
-                  req.hostname === 'localhost';
-  if (isLocal) {
+  // The host machine is always authorized
+  if (isHostRequest(req)) {
     return true;
   }
 
+  // Remote devices on shared Wi-Fi must supply the valid Room PIN
   const clientPin = (req.headers['x-airbridge-pin'] || req.query.pin || (req.body && req.body.pin) || '').toString().trim();
   return clientPin === appState.officeSecurity.pin && appState.officeSecurity.pin.length > 0;
 }
@@ -414,12 +448,13 @@ wss.on('connection', (ws, req) => {
   const clientName = queryName || defaultClientName;
   const ip = req.socket.remoteAddress ? req.socket.remoteAddress.replace(/^.*:/, '') : 'local';
 
-  const isLocalClient = ip === '127.0.0.1' || ip === 'localhost' || ip === 'local' || ip === '1' || ip === '::1';
-  let isAuthenticated = !appState.officeSecurity?.enabled || isLocalClient;
+  const isHostClient = isHostRequest(req);
+  let isAuthenticated = !appState.officeSecurity?.enabled || isHostClient;
   if (!isAuthenticated && queryPin && queryPin === appState.officeSecurity?.pin) {
     isAuthenticated = true;
   }
   ws.isAuthenticated = isAuthenticated;
+  ws.isHost = isHostClient;
 
   // Terminate any stale socket from the exact same device ID or physical IP+OS to prevent duplicates
   for (const [oldWs, oldInfo] of connectedClients.entries()) {
@@ -460,6 +495,7 @@ wss.on('connection', (ws, req) => {
         isMac,
         isLinux,
       },
+      isHost: ws.isHost,
       officeSecurity: {
         enabled: Boolean(appState.officeSecurity?.enabled),
         pin: ws.isAuthenticated ? appState.officeSecurity?.pin : undefined,
@@ -685,7 +721,8 @@ function getDirectoryStats(dirPath) {
 // Server info & network discovery
 app.get('/api/info', (req, res) => {
   const net = getNetworkIps();
-  const isAuthed = isAuthorizedRequest(req);
+  const isHost = isHostRequest(req);
+  const isAuthed = isHost || isAuthorizedRequest(req);
   let osDisplay = 'macOS ' + os.release();
   if (isWindows) {
     osDisplay = 'Windows ' + (os.release().startsWith('10.0.2') ? '11' : '10');
@@ -704,6 +741,7 @@ app.get('/api/info', (req, res) => {
     isWindows,
     isMac,
     isLinux,
+    isHost,
     downloadsDir: UPLOADS_DIR,
     connectedCount: getUniqueDevices().length,
     officeSecurity: {
@@ -734,14 +772,18 @@ app.post('/api/office/verify-pin', pinAuthLimiter, (req, res) => {
 
 // Configure Office Security (requires host or authed)
 app.post('/api/office/configure', apiLimiter, requireOfficeAuth, (req, res) => {
-  const { enabled, pin } = req.body;
+  const { enabled, regenerate, pin } = req.body;
   if (typeof enabled === 'boolean') {
     appState.officeSecurity.enabled = enabled;
   }
-  if (pin && typeof pin === 'string') {
-    appState.officeSecurity.pin = pin.trim().replace(/[^0-9]/g, '').slice(0, 8);
-  } else if (enabled && !appState.officeSecurity.pin) {
+  if (regenerate || !appState.officeSecurity.pin) {
     appState.officeSecurity.pin = Math.floor(1000 + Math.random() * 9000).toString();
+  } else if (pin && typeof pin === 'string') {
+    const raw = pin.trim().replace(/[^0-9]/g, '').slice(0, 8);
+    const num = parseInt(raw, 10);
+    if (!isNaN(num) && num >= 1000) {
+      appState.officeSecurity.pin = String(num);
+    }
   }
   saveAppState();
   broadcast({

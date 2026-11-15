@@ -25,6 +25,7 @@ export interface ServerInfo {
   isWindows?: boolean;
   isMac?: boolean;
   isLinux?: boolean;
+  isHost?: boolean;
   officeSecurity?: {
     enabled: boolean;
     requiresAuth: boolean;
@@ -308,18 +309,24 @@ export function useWebSocket() {
             }
 
             case 'office_security_updated': {
-              setOfficeSecurityEnabled(Boolean(data.officeSecurity?.enabled));
+              const isEnabled = Boolean(data.officeSecurity?.enabled);
+              setOfficeSecurityEnabled(isEnabled);
               if (data.officeSecurity?.pin) {
                 setOfficePin(data.officeSecurity.pin);
                 try {
                   localStorage.setItem('airbridge_office_pin', data.officeSecurity.pin);
                 } catch (e) {}
               }
+              if (!isEnabled) {
+                setIsOfficeLocked(false);
+              }
               break;
             }
 
             case 'init': {
-              setIsOfficeLocked(false);
+              if (data.isHost) {
+                setIsOfficeLocked(false);
+              }
               if (data.officeSecurity) {
                 setOfficeSecurityEnabled(Boolean(data.officeSecurity.enabled));
                 if (data.officeSecurity.pin) {
@@ -506,9 +513,12 @@ export function useWebSocket() {
       .then((res) => res.json())
       .then((info) => {
         setServerInfo(info);
+        if (info.isHost) {
+          setIsOfficeLocked(false);
+        }
         if (info.officeSecurity) {
           setOfficeSecurityEnabled(Boolean(info.officeSecurity.enabled));
-          if (info.officeSecurity.requiresAuth) {
+          if (!info.isHost && info.officeSecurity.requiresAuth) {
             setIsOfficeLocked(true);
           } else {
             setIsOfficeLocked(false);

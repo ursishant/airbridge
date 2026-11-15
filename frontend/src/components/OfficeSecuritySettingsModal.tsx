@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { X, Copy, Check, RefreshCw, ShieldCheck, ShieldAlert } from 'lucide-react';
 import { copyToClipboard } from '../utils/clipboard';
@@ -27,6 +27,12 @@ export const OfficeSecuritySettingsModal: React.FC<OfficeSecuritySettingsModalPr
   const [isUpdating, setIsUpdating] = useState(false);
   const [customPin, setCustomPin] = useState(officePin || '');
 
+  useEffect(() => {
+    if (officePin) {
+      setCustomPin(officePin);
+    }
+  }, [officePin]);
+
   const quickJoinUrl = serverUrl 
     ? `${serverUrl}/?pin=${encodeURIComponent(officePin || customPin)}`
     : typeof window !== 'undefined'
@@ -34,11 +40,14 @@ export const OfficeSecuritySettingsModal: React.FC<OfficeSecuritySettingsModalPr
     : '';
 
   const handleToggle = async () => {
+    if (isUpdating) return;
     setIsUpdating(true);
     try {
       const nextEnabled = !officeSecurityEnabled;
-      const pinToSet = officePin || customPin || Math.floor(1000 + Math.random() * 9000).toString();
+      const pinToSet = officePin || customPin;
       await onConfigureSecurity(nextEnabled, pinToSet);
+    } catch (err) {
+      showToast('Failed to toggle office security');
     } finally {
       setIsUpdating(false);
     }
@@ -122,7 +131,10 @@ export const OfficeSecuritySettingsModal: React.FC<OfficeSecuritySettingsModalPr
             </div>
 
             {/* Main Toggle Card */}
-            <div className="bento-card rounded-2xl p-4 flex items-center justify-between gap-3 mb-4 border border-black/[0.06] dark:border-white/[0.08]">
+            <div 
+              onClick={handleToggle}
+              className="bento-card rounded-2xl p-4 flex items-center justify-between gap-3 mb-4 border border-black/[0.06] dark:border-white/[0.08] cursor-pointer hover:border-black/20 dark:hover:border-white/20 transition-all select-none"
+            >
               <div>
                 <h4 className="font-display text-sm font-bold text-[#0F1115] dark:text-white">
                   Office Room Protection
@@ -133,11 +145,15 @@ export const OfficeSecuritySettingsModal: React.FC<OfficeSecuritySettingsModalPr
               </div>
 
               <button
-                onClick={handleToggle}
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  handleToggle();
+                }}
                 disabled={isUpdating}
                 className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none ${
                   officeSecurityEnabled ? 'bg-[#10B981]' : 'bg-black/20 dark:bg-white/20'
-                }`}
+                } ${isUpdating ? 'opacity-60 cursor-wait' : 'cursor-pointer'}`}
               >
                 <span
                   className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
