@@ -124,7 +124,7 @@ export const UniversalClipboard: React.FC<UniversalClipboardProps> = ({
 
           <div className="flex items-center justify-between gap-2 pt-1">
             <span className="text-[11px] text-[#64748B] dark:text-[#94A3B8] hidden sm:inline">
-              Press <kbd className="px-1.5 py-0.5 rounded bg-black/[0.05] dark:bg-white/[0.08] text-[#0F1115] dark:text-[#F3F4F6] border border-black/[0.06] dark:border-white/[0.08] font-mono text-[10px]">⌘/Ctrl + Enter</kbd> to beam
+              Press <kbd className="px-1.5 py-0.5 rounded bg-black/[0.05] dark:bg-white/[0.08] text-[#0F1115] dark:text-[#F3F4F6] border border-black/[0.06] dark:border-white/[0.08] font-mono text-[10px]">Ctrl / Cmd + Enter</kbd> to beam
             </span>
 
             <button

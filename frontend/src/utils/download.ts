@@ -1,3 +1,11 @@
+function getStoredOfficePin(): string {
+  try {
+    return localStorage.getItem('airbridge_office_pin') || '';
+  } catch (e) {
+    return '';
+  }
+}
+
 /**
  * Resilient multi-tier file downloader that effortlessly handles files of any size (up to 10GB+)
  * without running out of browser memory and without triggering Chrome's insecure download warnings.
@@ -7,7 +15,15 @@ export async function downloadFileSafely(
   filename: string,
   fileSize?: number
 ): Promise<boolean> {
+  const pin = getStoredOfficePin();
+  let authedUrl = url;
+  if (pin && !authedUrl.includes('pin=')) {
+    authedUrl += (authedUrl.includes('?') ? '&' : '?') + `pin=${encodeURIComponent(pin)}`;
+  }
+
   const isLarge = fileSize ? fileSize >= 100 * 1024 * 1024 : false;
+  const authHeaders: Record<string, string> = { 'Accept': '*/*' };
+  if (pin) authHeaders['x-airbridge-pin'] = pin;
 
   // Tier 1: File System Access API (Desktop Chrome / Edge / Opera)
   // Streams directly to disk chunk by chunk with 0MB browser heap memory!
@@ -17,7 +33,7 @@ export async function downloadFileSafely(
         suggestedName: filename,
       });
       const writable = await handle.createWritable();
-      const response = await fetch(url);
+      const response = await fetch(authedUrl, { headers: authHeaders });
       if (response.ok && response.body) {
         await response.body.pipeTo(writable);
         return true;
@@ -34,9 +50,9 @@ export async function downloadFileSafely(
   // Tier 2: In-Memory Blob URL (Best for files < 100MB, completely avoids Chrome HTTP download warnings)
   if (!isLarge) {
     try {
-      const response = await fetch(url, {
+      const response = await fetch(authedUrl, {
         method: 'GET',
-        headers: { 'Accept': '*/*' },
+        headers: authHeaders,
       });
 
       if (response.ok) {
@@ -67,7 +83,7 @@ export async function downloadFileSafely(
   try {
     const iframe = document.createElement('iframe');
     iframe.style.display = 'none';
-    iframe.src = url;
+    iframe.src = authedUrl;
     document.body.appendChild(iframe);
     setTimeout(() => {
       try { document.body.removeChild(iframe); } catch (e) {}
@@ -77,7 +93,7 @@ export async function downloadFileSafely(
     // Ultimate fallback: direct link trigger
     try {
       const link = document.createElement('a');
-      link.href = url;
+      link.href = authedUrl;
       link.download = filename;
       link.style.display = 'none';
       document.body.appendChild(link);

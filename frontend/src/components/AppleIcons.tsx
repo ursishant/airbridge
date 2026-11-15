@@ -237,3 +237,48 @@ export const AppleBatteryPill: React.FC<{ level: number; charging?: boolean; cla
     </div>
   );
 };
+
+/** Apple-Style Windows PC Hardware Glyph */
+export const AppleWindowsPcIcon: React.FC<{ className?: string; active?: boolean }> = ({ 
+  className = "w-10 h-10", 
+  active = true 
+}) => (
+  <svg viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg" className={className}>
+    <rect x="5" y="7" width="38" height="25" rx="3" fill="#1C1C1E" stroke="#3A3A3C" strokeWidth="1" />
+    <rect x="7" y="9" width="34" height="21" rx="2" fill="url(#appleWinScreen)" />
+    <g transform="translate(21.5, 16.5)" opacity={active ? "0.9" : "0.5"}>
+      <rect x="0" y="0" width="2.2" height="2.2" rx="0.3" fill="white" />
+      <rect x="2.8" y="0" width="2.2" height="2.2" rx="0.3" fill="white" />
+      <rect x="0" y="2.8" width="2.2" height="2.2" rx="0.3" fill="white" />
+      <rect x="2.8" y="2.8" width="2.2" height="2.2" rx="0.3" fill="white" />
+    </g>
+    <rect x="7" y="27" width="34" height="3" fill="#1C1C1E" fillOpacity="0.85" />
+    <circle cx="24" cy="28.5" r="0.8" fill="#0071E3" />
+    <rect x="22" y="32" width="4" height="6" fill="#8E8E93" />
+    <rect x="14" y="38" width="20" height="2" rx="1" fill="#D1D1D6" stroke="#8E8E93" strokeWidth="0.5" />
+    <defs>
+      <linearGradient id="appleWinScreen" x1="7" y1="9" x2="41" y2="30" gradientUnits="userSpaceOnUse">
+        <stop stopColor="#0A2540" />
+        <stop offset="0.6" stopColor="#0071E3" />
+        <stop offset="1" stopColor="#64D2FF" />
+      </linearGradient>
+    </defs>
+  </svg>
+);
+
+/** Apple-Style Shield Lock Glyph for Office Protection */
+export const AppleShieldLockIcon: React.FC<{ className?: string }> = ({ className = "w-5 h-5" }) => (
+  <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" className={className}>
+    <path
+      d="M12 2.5L4.5 5.5V11.2C4.5 16.2 7.7 20.8 12 22C16.3 20.8 19.5 16.2 19.5 11.2V5.5L12 2.5Z"
+      fill="#34C759"
+      fillOpacity="0.15"
+      stroke="#34C759"
+      strokeWidth="1.75"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+    <rect x="9.5" y="10.5" width="5" height="4" rx="1" fill="#34C759" />
+    <path d="M10.5 10.5V9.2C10.5 8.4 11.2 7.7 12 7.7C12.8 7.7 13.5 8.4 13.5 9.2V10.5" stroke="#34C759" strokeWidth="1.5" />
+  </svg>
+);

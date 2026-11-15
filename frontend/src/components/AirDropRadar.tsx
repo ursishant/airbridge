@@ -1,16 +1,21 @@
 import React, { useState, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { QRCodeSVG } from 'qrcode.react';
-import { Sparkles, FolderUp } from 'lucide-react';
+import { Sparkles, FolderUp, Users } from 'lucide-react';
 import type { ConnectedDevice, ServerInfo } from '../hooks/useWebSocket';
 import { 
   M3MacBookIcon, 
   M3PhoneIcon, 
+  M3WindowsPcIcon,
+  M3IosPhoneIcon,
+  M3LinuxIcon,
   M3PhotosIcon, 
   M3FolderIcon, 
   M3CameraIcon, 
   M3AirDropIcon, 
-  M3QrCodeIcon 
+  M3QrCodeIcon,
+  M3ShieldLockIcon,
+  M3BatteryPill
 } from './M3Icons';
 import { scanDataTransferItems, extractFilesFromList, type TraversedFile } from '../utils/folderUpload';
 
@@ -20,9 +25,13 @@ interface AirDropRadarProps {
   serverInfo: ServerInfo | null;
   isMac: boolean;
   isAndroid: boolean;
+  isWindows?: boolean;
   deviceName: string;
   isUploading?: boolean;
   uploadProgress?: number;
+  officeSecurityEnabled?: boolean;
+  officePin?: string;
+  onOpenSecuritySettings?: () => void;
   onOpenQR: () => void;
   onRingDevice: (target: 'android' | 'mac') => void;
   onDropFiles: (files: TraversedFile[] | FileList | File[]) => void;
@@ -34,9 +43,14 @@ export const AirDropRadar: React.FC<AirDropRadarProps> = ({
   myDeviceId,
   serverInfo,
   isMac,
+  isAndroid,
+  isWindows = false,
   deviceName,
   isUploading = false,
   uploadProgress = 0,
+  officeSecurityEnabled = false,
+  officePin = '',
+  onOpenSecuritySettings,
   onOpenQR: _onOpenQR,
   onRingDevice,
   onDropFiles,
@@ -50,21 +64,33 @@ export const AirDropRadar: React.FC<AirDropRadarProps> = ({
   const mediaInputRef = useRef<HTMLInputElement | null>(null);
   const cameraInputRef = useRef<HTMLInputElement | null>(null);
 
-  const androidDevices = devices.filter((d) => d.os === 'Android');
+  const otherDevices = devices.filter((d) => d.id !== myDeviceId);
   const myDevice = devices.find((d) => d.id === myDeviceId) || {
     id: 'local',
-    name: deviceName || (isMac ? 'MacBook' : 'Android'),
-    os: isMac ? 'macOS' : 'Android',
+    name: deviceName || (isWindows ? 'Windows PC' : isMac ? 'MacBook' : 'Android'),
+    os: (isWindows ? 'Windows' : isMac ? 'macOS' : isAndroid ? 'Android' : 'Browser') as ConnectedDevice['os'],
     ip: '127.0.0.1',
     connectedAt: Date.now(),
   };
 
-  const pairingUrl = serverInfo 
+  let rawPairingUrl = serverInfo 
     ? `http://${serverInfo.primaryIp}:${serverInfo.port}` 
     : (typeof window !== 'undefined' ? window.location.origin : '');
 
+  const pairingUrl = officeSecurityEnabled && officePin 
+    ? `${rawPairingUrl}/?pin=${encodeURIComponent(officePin)}`
+    : rawPairingUrl;
+
+  const renderDeviceIcon = (os: string, className = "w-6 h-7") => {
+    if (os === 'Windows') return <M3WindowsPcIcon className={className} active={true} />;
+    if (os === 'macOS') return <M3MacBookIcon className={className} active={true} />;
+    if (os === 'iOS') return <M3IosPhoneIcon className={className} active={true} />;
+    if (os === 'Linux') return <M3LinuxIcon className={className} />;
+    return <M3PhoneIcon className={className} active={true} />;
+  };
+
   const handleDeviceClick = (device: ConnectedDevice) => {
-    if (device.os === 'Android') {
+    if (device.os === 'Android' || device.os === 'iOS') {
       onRingDevice('android');
     } else {
       onRingDevice('mac');
@@ -155,14 +181,10 @@ export const AirDropRadar: React.FC<AirDropRadarProps> = ({
         <div className="relative z-10 space-y-6">
           {/* Row 1: Dual-Node Connection Conduit Stage */}
           <div className="flex flex-col sm:flex-row items-center justify-between gap-4 sm:gap-6">
-            {/* Host Mac Node */}
+            {/* Host Node */}
             <div className="flex items-center gap-3.5 w-full sm:w-auto">
               <div className="w-13 h-13 rounded-2xl bg-[#F8FAFC] dark:bg-[#1A2030] border border-black/[0.08] dark:border-white/[0.1] shadow-sm flex items-center justify-center shrink-0">
-                {myDevice.os === 'macOS' ? (
-                  <M3MacBookIcon className="w-7 h-7 text-[#0071E3] dark:text-white" active={true} />
-                ) : (
-                  <M3PhoneIcon className="w-6 h-7 text-[#0071E3] dark:text-white" active={true} />
-                )}
+                {renderDeviceIcon(myDevice.os, "w-7 h-7 text-[#0071E3] dark:text-white")}
               </div>
               <div className="min-w-0">
                 <div className="flex items-center gap-2">
@@ -180,46 +202,61 @@ export const AirDropRadar: React.FC<AirDropRadarProps> = ({
             </div>
 
             {/* Center Animated Conduit */}
-            <div className="flex flex-col items-center justify-center gap-1.5 shrink-0 py-1 sm:py-0">
+            <div className="flex flex-col items-center justify-center gap-2 shrink-0 py-1 sm:py-0">
               <div className="flex items-center gap-1.5 px-3.5 py-1 rounded-full bg-black/[0.03] dark:bg-white/[0.06] border border-black/[0.04] dark:border-white/[0.08]">
                 <span className="relative flex h-2 w-2">
                   <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#10B981] opacity-75" />
                   <span className="relative inline-flex rounded-full h-2 w-2 bg-[#10B981]" />
                 </span>
                 <span className="font-mono text-[10px] font-bold text-[#0F1115] dark:text-[#F3F4F6] tracking-wider">
-                  {androidDevices.length > 0 ? 'P2P DIRECT • 1.2ms' : 'LOCAL P2P READY'}
+                  {otherDevices.length > 0 ? `OFFICE MESH • ${otherDevices.length} PEER${otherDevices.length > 1 ? 'S' : ''} ACTIVE` : 'DIRECT LAN READY'}
                 </span>
               </div>
+
               <div className="flex items-center gap-1.5 opacity-80">
                 <span className="w-1.5 h-1.5 rounded-full bg-[#0071E3] animate-pulse" />
                 <span className="w-16 sm:w-28 h-1 bg-gradient-to-r from-[#0071E3] via-[#10B981] to-[#C6F432] rounded-full" />
                 <span className="w-1.5 h-1.5 rounded-full bg-[#C6F432] animate-pulse" />
               </div>
+
+              {/* Office Wi-Fi Security Pill */}
+              <button
+                onClick={() => onOpenSecuritySettings?.()}
+                className={`apple-press flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-mono font-bold transition-all ${
+                  officeSecurityEnabled
+                    ? 'bg-[#10B981]/15 text-[#10B981] border border-[#10B981]/30 hover:bg-[#10B981]/25'
+                    : 'bg-black/[0.04] dark:bg-white/[0.06] text-[#64748B] dark:text-[#94A3B8] border border-black/[0.06] dark:border-white/[0.08] hover:text-[#0F1115] dark:hover:text-white'
+                }`}
+                title="Click to configure Office Room Protection"
+              >
+                <M3ShieldLockIcon className="w-3 h-3" filled={officeSecurityEnabled} />
+                <span>{officeSecurityEnabled ? `PIN: ${officePin || 'ACTIVE'}` : 'OFFICE SHIELD'}</span>
+              </button>
             </div>
 
             {/* Remote Peer Node */}
             <div className="flex items-center gap-3 w-full sm:w-auto justify-end">
-              {androidDevices.length > 0 ? (
+              {otherDevices.length > 0 ? (
                 <>
                   <div className="text-right min-w-0">
                     <div className="flex items-center justify-end gap-1.5">
                       <h4 className="font-display text-sm sm:text-base font-bold text-[#0F1115] dark:text-[#F3F4F6] truncate tracking-tight">
-                        {androidDevices[0].name}
+                        {otherDevices.length === 1 ? otherDevices[0].name : `${otherDevices.length} Office Devices`}
                       </h4>
                       <span className="text-[10px] font-mono font-bold uppercase px-2 py-0.5 rounded-full bg-[#10B981]/15 text-[#10B981]">
-                        Peer
+                        {otherDevices.length === 1 ? otherDevices[0].os : 'Office Mesh'}
                       </span>
                     </div>
                     <p className="text-xs text-[#64748B] dark:text-[#94A3B8] font-mono truncate mt-0.5">
-                      {androidDevices[0].ip} • P2P Active
+                      {otherDevices.length === 1 ? `${otherDevices[0].ip} • P2P Active` : 'Windows, Mac, Phone'}
                     </p>
                   </div>
                   <button
-                    onClick={() => handleDeviceClick(androidDevices[0])}
+                    onClick={() => handleDeviceClick(otherDevices[0])}
                     className="apple-press w-13 h-13 rounded-2xl bg-[#F8FAFC] dark:bg-[#1A2030] border border-black/[0.08] dark:border-white/[0.1] shadow-sm flex items-center justify-center shrink-0 cursor-pointer"
-                    title="Click to ring phone"
+                    title={`Click to ping ${otherDevices[0].name}`}
                   >
-                    <M3PhoneIcon className="w-6 h-7 text-[#10B981]" active={true} />
+                    {renderDeviceIcon(otherDevices[0].os, "w-6 h-7 text-[#10B981]")}
                   </button>
                 </>
               ) : (
@@ -233,13 +270,51 @@ export const AirDropRadar: React.FC<AirDropRadarProps> = ({
                     <M3QrCodeIcon className="w-4 h-4 text-[#0071E3] dark:text-[#C6F432]" />
                   </div>
                   <div className="text-left">
-                    <p className="font-display text-xs font-bold text-[#0F1115] dark:text-[#F3F4F6]">Connect Phone</p>
+                    <p className="font-display text-xs font-bold text-[#0F1115] dark:text-[#F3F4F6]">Pair Device</p>
                     <p className="text-[10px] text-[#0071E3] dark:text-[#C6F432] font-mono font-semibold">Scan QR code →</p>
                   </div>
                 </button>
               )}
             </div>
           </div>
+
+          {/* Connected Office Peer Roster (when multiple office devices connected) */}
+          {otherDevices.length > 1 && (
+            <div className="pt-2 pb-1 border-t border-black/[0.06] dark:border-white/[0.06]">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-[10px] font-bold font-mono uppercase tracking-wider text-[#64748B] dark:text-[#94A3B8] flex items-center gap-1.5">
+                  <Users className="w-3 h-3 text-[#0071E3] dark:text-[#C6F432]" />
+                  Connected Office Devices ({otherDevices.length})
+                </span>
+                <span className="text-[10px] text-[#10B981] font-mono font-bold">1 Gbps Direct LAN</span>
+              </div>
+              <div className="flex items-center gap-2 overflow-x-auto pb-1 scrollbar-none">
+                {otherDevices.map((dev) => (
+                  <div
+                    key={dev.id}
+                    onClick={() => handleDeviceClick(dev)}
+                    className="apple-press flex items-center gap-2 px-3 py-1.5 rounded-xl bg-black/[0.03] dark:bg-white/[0.05] border border-black/[0.06] dark:border-white/[0.06] hover:border-[#0071E3] transition-colors shrink-0 cursor-pointer"
+                    title={`Click to ping ${dev.name}`}
+                  >
+                    <div className="shrink-0">
+                      {renderDeviceIcon(dev.os, "w-4 h-4 text-[#0071E3] dark:text-[#C6F432]")}
+                    </div>
+                    <div className="min-w-0">
+                      <p className="text-xs font-bold text-[#0F1115] dark:text-white truncate max-w-[120px]">
+                        {dev.name}
+                      </p>
+                      <p className="text-[10px] font-mono text-[#64748B] dark:text-[#94A3B8]">
+                        {dev.os} • {dev.ip}
+                      </p>
+                    </div>
+                    {dev.battery && (
+                      <M3BatteryPill level={dev.battery.level} charging={dev.battery.charging} className="ml-1" />
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* Inline QR Dropdown if opened */}
           <AnimatePresence>

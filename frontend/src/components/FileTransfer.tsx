@@ -15,7 +15,7 @@ import {
   List,
   CheckCircle2
 } from 'lucide-react';
-import type { UploadedFileItem } from '../hooks/useWebSocket';
+import type { UploadedFileItem, ServerInfo } from '../hooks/useWebSocket';
 import { M3FolderIcon, M3DocumentIcon } from './M3Icons';
 import { ConfirmModal } from './ConfirmModal';
 import { downloadFileSafely } from '../utils/download';
@@ -28,6 +28,8 @@ interface FileItemWithFolder extends UploadedFileItem {
 interface FileTransferProps {
   isAndroid: boolean;
   isMac: boolean;
+  isWindows?: boolean;
+  serverInfo?: ServerInfo | null;
   recentFiles: UploadedFileItem[];
   showToast: (msg: string) => void;
   companionDeck?: React.ReactNode;
@@ -37,10 +39,19 @@ type FilterCategory = 'all' | 'folders' | 'media' | 'docs';
 
 export const FileTransfer: React.FC<FileTransferProps> = ({
   isMac,
+  isWindows = false,
+  serverInfo,
   recentFiles,
   showToast,
   companionDeck,
 }) => {
+  const getPin = () => {
+    try {
+      return localStorage.getItem('airbridge_office_pin') || '';
+    } catch (e) {
+      return '';
+    }
+  };
   const [allFiles, setAllFiles] = useState<FileItemWithFolder[]>(() => {
     try {
       const cached = localStorage.getItem('airbridge_cached_files');
@@ -57,7 +68,10 @@ export const FileTransfer: React.FC<FileTransferProps> = ({
 
   const fetchFiles = async () => {
     try {
-      const res = await fetch('/api/files');
+      const pin = getPin();
+      const headers: Record<string, string> = {};
+      if (pin) headers['x-airbridge-pin'] = pin;
+      const res = await fetch('/api/files', { headers });
       if (res.ok) {
         const data = await res.json();
         const filesList = data.files || [];
@@ -91,10 +105,14 @@ export const FileTransfer: React.FC<FileTransferProps> = ({
 
   const executeDelete = async (filename: string) => {
     try {
+      const pin = getPin();
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (pin) headers['x-airbridge-pin'] = pin;
+
       // 1. Try POST /api/files/delete with JSON body (handles spaces and special characters reliably)
       let res = await fetch('/api/files/delete', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({ filename }),
       });
 
@@ -102,6 +120,7 @@ export const FileTransfer: React.FC<FileTransferProps> = ({
       if (!res.ok) {
         res = await fetch(`/api/files/${encodeURIComponent(filename)}`, {
           method: 'DELETE',
+          headers,
         });
       }
 
@@ -127,28 +146,33 @@ export const FileTransfer: React.FC<FileTransferProps> = ({
 
   const handleOpenInFinder = async (filename?: string) => {
     try {
+      const pin = getPin();
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (pin) headers['x-airbridge-pin'] = pin;
+
       const res = await fetch('/api/open-in-finder', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({ filename }),
       });
       if (res.ok) {
-        showToast('Revealed in macOS Finder');
+        const isWin = isWindows || serverInfo?.isWindows || serverInfo?.platform === 'win32';
+        showToast(isWin ? 'Revealed in Windows File Explorer' : 'Revealed in Finder');
       }
     } catch (e) {
-      showToast('Failed to open Finder');
+      showToast('Failed to open file manager');
     }
   };
 
   const handleSafeDownload = async (url: string, filename: string, fileSize?: number) => {
     setDownloadingName(filename);
-    showToast(`⏳ Downloading ${filename}...`);
+    showToast(`Downloading ${filename}...`);
     try {
       const success = await downloadFileSafely(url, filename, fileSize);
       if (success) {
         showToast(`Saved ${filename}`);
       } else {
-        showToast(`Download started`);
+        showToast('Download started');
       }
     } catch (e) {
       showToast('Download error');
@@ -228,30 +252,30 @@ export const FileTransfer: React.FC<FileTransferProps> = ({
           <div>
             <div className="flex items-center gap-2">
               <h3 className="font-display text-base font-bold text-[#0F1115] dark:text-white tracking-tight">
-                AirBridge Vault Archive
+                Office Shared Files Folder
               </h3>
               <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded-full bg-black/[0.05] dark:bg-white/[0.08] text-[#0071E3] dark:text-[#C6F432]">
                 {allFiles.length} {allFiles.length === 1 ? 'FILE' : 'FILES'}
               </span>
             </div>
             <p className="text-xs text-[#64748B] dark:text-[#94A3B8] mt-0.5">
-              Direct Wi-Fi storage in <code className="font-mono text-[#0F1115] dark:text-white bg-black/[0.04] dark:bg-white/10 px-1.5 py-0.5 rounded text-[11px]">~/Downloads/AirBridge</code>
+              Direct Wi-Fi storage in <code className="font-mono text-[#0F1115] dark:text-white bg-black/[0.04] dark:bg-white/10 px-1.5 py-0.5 rounded text-[11px]">{serverInfo?.downloadsDir || '~/Downloads/AirBridge'}</code>
             </p>
           </div>
         </div>
 
         {/* Action Tools: Finder Reveal, ZIP Download All, Layout Switcher */}
         <div className="flex items-center gap-2 self-start sm:self-auto">
-          {isMac && (
+          {(isMac || isWindows || serverInfo?.isWindows) && (
             <button
               onClick={() => {
                 handleOpenInFinder();
               }}
               className="apple-press flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-[#F8FAFC] dark:bg-[#181E2E] hover:bg-black/[0.04] dark:hover:bg-[#222A3E] text-[#0F1115] dark:text-white border border-black/[0.06] dark:border-white/[0.08] shadow-sm transition-colors"
-              title="Reveal in macOS Finder"
+              title={isWindows || serverInfo?.isWindows ? "Reveal in File Explorer" : "Reveal in Finder"}
             >
               <M3FolderIcon className="w-3.5 h-3.5 text-[#0071E3] dark:text-[#38BDF8]" />
-              <span>Finder</span>
+              <span>{isWindows || serverInfo?.isWindows ? 'Explorer' : 'Finder'}</span>
             </button>
           )}
 
@@ -438,13 +462,13 @@ export const FileTransfer: React.FC<FileTransferProps> = ({
                         <span>{isDirectory ? 'Get ZIP' : 'Download'}</span>
                       </button>
 
-                      {isMac && (
+                      {(isMac || isWindows || serverInfo?.isWindows) && (
                         <button
                           onClick={() => {
                             handleOpenInFinder(file.name);
                           }}
                           className="apple-press hidden xs:flex p-1.5 rounded-xl text-[#64748B] hover:text-[#0F1115] dark:text-[#94A3B8] dark:hover:text-white hover:bg-black/[0.04] dark:hover:bg-white/[0.08] transition-colors"
-                          title="Reveal in macOS Finder"
+                          title={isWindows || serverInfo?.isWindows ? "Reveal in File Explorer" : "Reveal in Finder"}
                         >
                           <M3FolderIcon className="w-4 h-4 text-[#0071E3] dark:text-[#38BDF8]" />
                         </button>

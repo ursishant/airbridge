@@ -14,6 +14,11 @@ const qrcodeTerminal = require('qrcode-terminal');
 
 const PORT = process.env.PORT || 5050;
 
+// Host OS detection
+const isWindows = process.platform === 'win32';
+const isMac = process.platform === 'darwin';
+const isLinux = process.platform === 'linux';
+
 // Resolve transfer directory in ~/Downloads/AirBridge or local fallback
 const DOWNLOADS_DIR = path.join(os.homedir(), 'Downloads', 'AirBridge');
 if (!fs.existsSync(DOWNLOADS_DIR)) {
@@ -28,26 +33,45 @@ if (!fs.existsSync(UPLOADS_DIR)) {
   fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 }
 
-// IP detection helper
+// IP detection helper with full Windows adapter & virtual interface filtering
 function getNetworkIps() {
   const interfaces = os.networkInterfaces();
   const validIps = [];
   let preferredIp = 'localhost';
 
   for (const name of Object.keys(interfaces)) {
+    const lowerName = name.toLowerCase();
+    const isVirtual = /vethernet|virtual|vmnet|wsl|tailscale|zerotier|docker|loopback|tap|tun/i.test(lowerName);
+
     for (const iface of interfaces[name]) {
       if (iface.family === 'IPv4' && !iface.internal) {
+        const isWifi = /^(en|wl|wi-fi|wireless)/i.test(lowerName);
+        const isEthernet = /^(eth|ethernet|local area connection)/i.test(lowerName);
+
         validIps.push({
           interface: name,
           address: iface.address,
-          isWifi: name.startsWith('en') || name.startsWith('wl'),
+          isWifi,
+          isVirtual,
         });
-        // Prefer en0 or wifi interface
-        if (!preferredIp || preferredIp === 'localhost' || name === 'en0') {
-          preferredIp = iface.address;
+
+        // Preference order:
+        // 1. Non-virtual Wi-Fi or Ethernet
+        // 2. en0 on macOS or Wi-Fi on Windows
+        // 3. Standard private LAN subnets (192.168.x.x, 10.x.x.x, 172.16-31.x.x)
+        if (!isVirtual) {
+          if (preferredIp === 'localhost' || name === 'en0' || lowerName.includes('wi-fi')) {
+            preferredIp = iface.address;
+          } else if (/^(192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[01])\.)/.test(iface.address) && preferredIp === 'localhost') {
+            preferredIp = iface.address;
+          }
         }
       }
     }
+  }
+
+  if (preferredIp === 'localhost' && validIps.length > 0) {
+    preferredIp = validIps[0].address;
   }
 
   return {
@@ -56,10 +80,10 @@ function getNetworkIps() {
   };
 }
 
-// macOS Battery state helper
+// Battery state helper for macOS
 function getMacBattery() {
   return new Promise((resolve) => {
-    if (os.platform() !== 'darwin') return resolve(null);
+    if (!isMac) return resolve(null);
     exec('pmset -g batt', (err, stdout) => {
       if (err || !stdout) return resolve(null);
       const match = stdout.match(/(\d+)%/);
@@ -77,6 +101,46 @@ function getMacBattery() {
   });
 }
 
+// Battery state helper for Windows
+function getWindowsBattery() {
+  return new Promise((resolve) => {
+    if (!isWindows) return resolve(null);
+    execFile('powershell', [
+      '-NoProfile',
+      '-NonInteractive',
+      '-Command',
+      'Get-CimInstance -ClassName Win32_Battery | Select-Object -First 1 -Property EstimatedChargeRemaining, BatteryStatus | ConvertTo-Json'
+    ], (err, stdout) => {
+      if (err || !stdout) return resolve(null);
+      try {
+        const parsed = JSON.parse(stdout);
+        const level = parseInt(parsed.EstimatedChargeRemaining, 10);
+        const status = parseInt(parsed.BatteryStatus, 10);
+        const charging = status === 2 || status === 6 || status === 7 || status === 8;
+        if (!isNaN(level)) {
+          return resolve({ level, charging });
+        }
+      } catch (e) {}
+      resolve(null);
+    });
+  });
+}
+
+async function getHostBattery() {
+  if (isMac) return await getMacBattery();
+  if (isWindows) return await getWindowsBattery();
+  return null;
+}
+
+// Native audio ping / notification
+function playHostAlertSound() {
+  if (isMac) {
+    execFile('afplay', ['/System/Library/Sounds/Glass.aiff'], () => {});
+  } else if (isWindows) {
+    execFile('powershell', ['-NoProfile', '-Command', '[System.Console]::Beep(880, 250)'], () => {});
+  }
+}
+
 const app = express();
 app.use(cors());
 
@@ -88,6 +152,15 @@ const apiLimiter = rateLimit({
   legacyHeaders: false,
 });
 app.use(apiLimiter);
+
+// Dedicated strict rate limiter for Office Room PIN verification to prevent brute-forcing
+const pinAuthLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30, // maximum 30 attempts per 15 minutes
+  message: { error: 'Too many PIN verification attempts. Please wait 15 minutes.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
 
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
@@ -177,13 +250,17 @@ server.keepAliveTimeout = 120000; // 2 minutes keep-alive
 server.timeout = 0; // No socket timeout
 const wss = new WebSocketServer({ server });
 
-// Persistent Application State (Chat history, Clipboard history, Known paired devices)
+// Persistent Application State (Chat history, Clipboard history, Known paired devices, Office Room Security)
 const STATE_FILE = path.join(UPLOADS_DIR, '.airbridge_state.json');
 
 let appState = {
   chatHistory: [],
   clipboardHistory: [],
   knownDevices: [],
+  officeSecurity: {
+    enabled: false,
+    pin: '',
+  },
 };
 
 // Load state from disk on startup
@@ -194,6 +271,12 @@ try {
     if (Array.isArray(parsed.chatHistory)) appState.chatHistory = parsed.chatHistory;
     if (Array.isArray(parsed.clipboardHistory)) appState.clipboardHistory = parsed.clipboardHistory;
     if (Array.isArray(parsed.knownDevices)) appState.knownDevices = parsed.knownDevices;
+    if (parsed.officeSecurity && typeof parsed.officeSecurity === 'object') {
+      appState.officeSecurity = {
+        enabled: Boolean(parsed.officeSecurity.enabled),
+        pin: String(parsed.officeSecurity.pin || '').trim(),
+      };
+    }
     console.log(`[Storage] Loaded persistent state: ${appState.chatHistory.length} chats, ${appState.clipboardHistory.length} clipboard items.`);
   }
 } catch (e) {
@@ -206,6 +289,37 @@ function saveAppState() {
   } catch (e) {
     console.error('Error saving persistent state:', e.message);
   }
+}
+
+// Office Room Security Authorization helpers
+function isAuthorizedRequest(req) {
+  if (!appState.officeSecurity || !appState.officeSecurity.enabled) {
+    return true;
+  }
+
+  const remote = (req.socket.remoteAddress || '').replace(/^.*:/, '');
+  const isLocal = remote === '127.0.0.1' || 
+                  remote === 'localhost' || 
+                  remote === 'local' || 
+                  remote === '1' ||
+                  req.hostname === 'localhost';
+  if (isLocal) {
+    return true;
+  }
+
+  const clientPin = (req.headers['x-airbridge-pin'] || req.query.pin || (req.body && req.body.pin) || '').toString().trim();
+  return clientPin === appState.officeSecurity.pin && appState.officeSecurity.pin.length > 0;
+}
+
+function requireOfficeAuth(req, res, next) {
+  if (isAuthorizedRequest(req)) {
+    return next();
+  }
+  return res.status(401).json({
+    error: 'Office Space is protected by Room PIN',
+    officeSecurity: true,
+    requiresPin: true,
+  });
 }
 
 // Connected devices state (active live sockets)
@@ -241,7 +355,7 @@ function getUniqueDevices() {
       }
     }
   }
-  return Array.from(deviceMap.values()).slice(0, 5);
+  return Array.from(deviceMap.values()).slice(0, 50);
 }
 
 function broadcastDevicesList() {
@@ -261,20 +375,45 @@ wss.on('connection', (ws, req) => {
 
   let queryId = null;
   let queryName = null;
+  let queryPin = null;
   try {
     const urlObj = new URL(req.url, 'http://localhost');
     queryId = urlObj.searchParams.get('id');
     queryName = urlObj.searchParams.get('name');
+    queryPin = urlObj.searchParams.get('pin');
   } catch (e) {}
 
   const userAgent = req.headers['user-agent'] || '';
   const isAndroid = /android/i.test(userAgent);
-  const isMac = /macintosh|mac os x/i.test(userAgent);
+  const isIos = /iphone|ipad|ipod/i.test(userAgent);
+  const isMacClient = /macintosh|mac os x/i.test(userAgent) && !isIos;
+  const isWindowsClient = /windows|win32|win64/i.test(userAgent);
+  const isLinuxClient = /linux/i.test(userAgent) && !isAndroid;
+
+  let osType = 'Browser';
+  if (isWindowsClient) osType = 'Windows';
+  else if (isMacClient) osType = 'macOS';
+  else if (isAndroid) osType = 'Android';
+  else if (isIos) osType = 'iOS';
+  else if (isLinuxClient) osType = 'Linux';
+
+  let defaultClientName = 'Office Device';
+  if (isWindowsClient) defaultClientName = 'Windows PC';
+  else if (isMacClient) defaultClientName = 'MacBook';
+  else if (isAndroid) defaultClientName = 'Android Device';
+  else if (isIos) defaultClientName = /ipad/i.test(userAgent) ? 'iPad' : 'iPhone';
+  else if (isLinuxClient) defaultClientName = 'Linux PC';
 
   const clientId = queryId || ('dev_' + Math.random().toString(36).substring(2, 9));
-  const clientName = queryName || (isAndroid ? 'Android Device' : isMac ? 'MacBook' : 'Web Device');
+  const clientName = queryName || defaultClientName;
   const ip = req.socket.remoteAddress ? req.socket.remoteAddress.replace(/^.*:/, '') : 'local';
-  const osType = isAndroid ? 'Android' : isMac ? 'macOS' : 'Browser';
+
+  const isLocalClient = ip === '127.0.0.1' || ip === 'localhost' || ip === 'local' || ip === '1' || ip === '::1';
+  let isAuthenticated = !appState.officeSecurity?.enabled || isLocalClient;
+  if (!isAuthenticated && queryPin && queryPin === appState.officeSecurity?.pin) {
+    isAuthenticated = true;
+  }
+  ws.isAuthenticated = isAuthenticated;
 
   // Terminate any stale socket from the exact same device ID or physical IP+OS to prevent duplicates
   for (const [oldWs, oldInfo] of connectedClients.entries()) {
@@ -299,26 +438,60 @@ wss.on('connection', (ws, req) => {
 
   connectedClients.set(ws, initialDeviceInfo);
 
-  // Send welcome handshake with full persistent chat and clipboard history
-  ws.send(JSON.stringify({
-    type: 'init',
-    clientId,
-    deviceInfo: initialDeviceInfo,
-    devices: getUniqueDevices(),
-    chatHistory: appState.chatHistory.slice(-200),
-    clipboardHistory: appState.clipboardHistory.slice(-50),
-    serverInfo: {
-      downloadsDir: UPLOADS_DIR,
-      hostname: os.hostname(),
-      platform: os.platform(),
-    },
-  }));
+  function sendClientInit(targetWs) {
+    targetWs.send(JSON.stringify({
+      type: 'init',
+      clientId,
+      deviceInfo: initialDeviceInfo,
+      devices: getUniqueDevices(),
+      chatHistory: appState.chatHistory.slice(-200),
+      clipboardHistory: appState.clipboardHistory.slice(-50),
+      serverInfo: {
+        downloadsDir: UPLOADS_DIR,
+        hostname: os.hostname(),
+        platform: process.platform,
+        isWindows,
+        isMac,
+        isLinux,
+      },
+      officeSecurity: {
+        enabled: Boolean(appState.officeSecurity?.enabled),
+        pin: ws.isAuthenticated ? appState.officeSecurity?.pin : undefined,
+      },
+    }));
+  }
 
-  broadcastDevicesList();
+  if (isAuthenticated) {
+    sendClientInit(ws);
+    broadcastDevicesList();
+  } else {
+    ws.send(JSON.stringify({
+      type: 'auth_required',
+      officeSecurity: true,
+    }));
+  }
 
   ws.on('message', async (raw) => {
     try {
       const msg = JSON.parse(raw.toString());
+
+      if (msg.type === 'authenticate') {
+        const clientPin = (msg.pin || '').toString().trim();
+        if (clientPin === appState.officeSecurity?.pin) {
+          ws.isAuthenticated = true;
+          sendClientInit(ws);
+          broadcastDevicesList();
+        } else {
+          ws.send(JSON.stringify({ type: 'auth_failed', error: 'Invalid PIN' }));
+        }
+        return;
+      }
+
+      // Guard all messages behind authentication if Office Security is active
+      if (!ws.isAuthenticated && appState.officeSecurity?.enabled) {
+        ws.send(JSON.stringify({ type: 'auth_required' }));
+        return;
+      }
 
       switch (msg.type) {
         case 'identify': {
@@ -390,14 +563,12 @@ wss.on('connection', (ws, req) => {
           break;
         }
 
+        case 'ping_host':
         case 'ping_mac': {
-          // Play a native notification beep on macOS
-          exec('afplay /System/Library/Sounds/Glass.aiff', (err) => {
-            if (err) console.log('Ping sound err:', err.message);
-          });
+          playHostAlertSound();
           broadcast({
             type: 'toast',
-            message: `Ping received from ${initialDeviceInfo.name}!`,
+            message: `Ping received from ${initialDeviceInfo.name}`,
           });
           break;
         }
@@ -508,26 +679,77 @@ function getDirectoryStats(dirPath) {
 // Server info & network discovery
 app.get('/api/info', (req, res) => {
   const net = getNetworkIps();
+  const isAuthed = isAuthorizedRequest(req);
+  let osDisplay = 'macOS ' + os.release();
+  if (isWindows) {
+    osDisplay = 'Windows ' + (os.release().startsWith('10.0.2') ? '11' : '10');
+  } else if (isLinux) {
+    osDisplay = 'Linux ' + os.release();
+  }
+
   res.json({
     primaryIp: net.primaryIp,
     allIps: net.allIps,
     port: PORT,
     url: `http://${net.primaryIp}:${PORT}`,
     hostname: os.hostname(),
-    os: 'macOS ' + os.release(),
+    platform: process.platform,
+    os: osDisplay,
+    isWindows,
+    isMac,
+    isLinux,
     downloadsDir: UPLOADS_DIR,
     connectedCount: getUniqueDevices().length,
+    officeSecurity: {
+      enabled: Boolean(appState.officeSecurity?.enabled),
+      requiresAuth: !isAuthed,
+      pin: isAuthed ? appState.officeSecurity?.pin : undefined,
+    },
   });
 });
 
-// Battery endpoint for macOS host & web clients
+// Battery endpoint for macOS & Windows host & web clients
 app.get('/api/battery', async (req, res) => {
-  const battery = await getMacBattery();
+  const battery = await getHostBattery();
   res.json({ battery });
 });
 
+// Verify Office Room PIN
+app.post('/api/office/verify-pin', pinAuthLimiter, (req, res) => {
+  const pin = (req.body && req.body.pin ? String(req.body.pin) : '').trim();
+  if (!appState.officeSecurity?.enabled) {
+    return res.json({ success: true, enabled: false });
+  }
+  if (pin === appState.officeSecurity.pin) {
+    return res.json({ success: true, enabled: true });
+  }
+  return res.status(401).json({ error: 'Incorrect Room PIN', success: false });
+});
+
+// Configure Office Security (requires host or authed)
+app.post('/api/office/configure', apiLimiter, requireOfficeAuth, (req, res) => {
+  const { enabled, pin } = req.body;
+  if (typeof enabled === 'boolean') {
+    appState.officeSecurity.enabled = enabled;
+  }
+  if (pin && typeof pin === 'string') {
+    appState.officeSecurity.pin = pin.trim().replace(/[^0-9]/g, '').slice(0, 8);
+  } else if (enabled && !appState.officeSecurity.pin) {
+    appState.officeSecurity.pin = Math.floor(1000 + Math.random() * 9000).toString();
+  }
+  saveAppState();
+  broadcast({
+    type: 'office_security_updated',
+    officeSecurity: {
+      enabled: appState.officeSecurity.enabled,
+      pin: appState.officeSecurity.pin,
+    },
+  });
+  res.json({ success: true, officeSecurity: appState.officeSecurity });
+});
+
 // Upload endpoint (supports full recursive folder beaming up to 1000 files)
-app.post('/api/upload', upload.array('files', 1000), (req, res) => {
+app.post('/api/upload', apiLimiter, requireOfficeAuth, upload.array('files', 1000), (req, res) => {
   if (!req.files || req.files.length === 0) {
     return res.status(400).json({ error: 'No files uploaded' });
   }
@@ -564,7 +786,7 @@ app.post('/api/upload', upload.array('files', 1000), (req, res) => {
 });
 
 // Resumable Chunked Upload for arbitrarily large files (1GB, 5GB, 10GB+)
-app.post('/api/upload-chunk', chunkUpload.single('chunk'), async (req, res) => {
+app.post('/api/upload-chunk', apiLimiter, requireOfficeAuth, chunkUpload.single('chunk'), async (req, res) => {
   const safeChunksDir = path.resolve(CHUNKS_TEMP_DIR);
   const chunkFileName = path.basename(req.file ? req.file.path : '');
   const safeChunkPath = path.resolve(safeChunksDir, chunkFileName);
@@ -698,7 +920,7 @@ app.post('/api/upload-chunk', chunkUpload.single('chunk'), async (req, res) => {
 });
 
 // Instant Camera Snap upload via multipart form-data (multer diskStorage)
-app.post('/api/upload-snap', upload.single('file'), (req, res) => {
+app.post('/api/upload-snap', apiLimiter, requireOfficeAuth, upload.single('file'), (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'No image uploaded' });
@@ -716,17 +938,17 @@ app.post('/api/upload-snap', upload.single('file'), (req, res) => {
       note: req.body.note || '',
     };
 
-    // Play macOS camera shutter sound if available
-    execFile('afplay', ['/System/Library/Components/CoreAudio.component/Contents/SharedSupport/SystemSounds/system/payment_success.caf'], (err) => {
-      if (err) {
-        execFile('afplay', ['/System/Library/Sounds/Ping.aiff'], () => {});
-      }
-    });
+    // Play camera snap sound if available
+    if (isMac) {
+      execFile('afplay', ['/System/Library/Components/CoreAudio.component/Contents/SharedSupport/SystemSounds/system/payment_success.caf'], (err) => {
+        if (err) execFile('afplay', ['/System/Library/Sounds/Ping.aiff'], () => {});
+      });
+    }
 
     broadcast({
       type: 'files_uploaded',
       files: [fileInfo],
-      sender: req.body.sender || 'Android Camera',
+      sender: req.body.sender || 'Mobile Camera',
     });
 
     res.json({ success: true, file: fileInfo });
@@ -737,7 +959,7 @@ app.post('/api/upload-snap', upload.single('file'), (req, res) => {
 });
 
 // List files and folders in transfer directory
-app.get('/api/files', (req, res) => {
+app.get('/api/files', requireOfficeAuth, (req, res) => {
   fs.readdir(UPLOADS_DIR, (err, items) => {
     if (err) {
       return res.status(500).json({ error: 'Failed to read directory' });
@@ -780,7 +1002,7 @@ app.get('/api/files', (req, res) => {
 });
 
 // Download single file or file nested inside a folder with secure headers
-app.get(/^\/api\/files\/(.*)/, (req, res) => {
+app.get(/^\/api\/files\/(.*)/, requireOfficeAuth, (req, res) => {
   const reqPath = decodeURIComponent(req.params[0] || '');
   const ROOT = path.resolve(UPLOADS_DIR);
   const filePath = path.resolve(ROOT, reqPath);
@@ -802,7 +1024,7 @@ app.get(/^\/api\/files\/(.*)/, (req, res) => {
 });
 
 // Stream or view raw file
-app.get(/^\/api\/files-raw\/(.*)/, (req, res) => {
+app.get(/^\/api\/files-raw\/(.*)/, requireOfficeAuth, (req, res) => {
   const reqPath = decodeURIComponent(req.params[0] || '');
   const ROOT = path.resolve(UPLOADS_DIR);
   const filePath = path.resolve(ROOT, reqPath);
@@ -819,7 +1041,7 @@ app.get(/^\/api\/files-raw\/(.*)/, (req, res) => {
 });
 
 // Download entire folder as a ZIP archive on demand with secure headers
-app.get(/^\/api\/download-folder\/(.*)/, (req, res) => {
+app.get(/^\/api\/download-folder\/(.*)/, requireOfficeAuth, (req, res) => {
   const folderRelPath = decodeURIComponent(req.params[0] || '');
   const ROOT = path.resolve(UPLOADS_DIR);
   const folderPath = path.resolve(ROOT, folderRelPath);
@@ -845,7 +1067,7 @@ app.get(/^\/api\/download-folder\/(.*)/, (req, res) => {
 });
 
 // Download all files as a ZIP archive with secure headers
-app.get('/api/download-zip', (req, res) => {
+app.get('/api/download-zip', requireOfficeAuth, (req, res) => {
   const archive = new ZipArchive({ zlib: { level: 6 } });
   res.setHeader('Content-Type', 'application/zip');
   res.setHeader('Content-Disposition', 'attachment; filename="AirBridge_Files.zip"');
@@ -885,6 +1107,10 @@ function deleteFileOrDirectory(targetName) {
 
 // Delete a file or directory (supports DELETE and POST with JSON body for maximum client compatibility)
 const handleDeleteFileRequest = (req, res) => {
+  if (!isAuthorizedRequest(req)) {
+    return res.status(401).json({ error: 'Office Space is protected by Room PIN', officeSecurity: true });
+  }
+
   let filename = '';
   if (req.body && req.body.filename) {
     filename = req.body.filename;
@@ -913,19 +1139,19 @@ const handleDeleteFileRequest = (req, res) => {
   }
 };
 
-app.delete(/^\/api\/files\/(.*)/, handleDeleteFileRequest);
-app.delete('/api/files/{*filename}', handleDeleteFileRequest);
-app.post('/api/files/delete', handleDeleteFileRequest);
+app.delete(/^\/api\/files\/(.*)/, apiLimiter, handleDeleteFileRequest);
+app.delete('/api/files/{*filename}', apiLimiter, handleDeleteFileRequest);
+app.post('/api/files/delete', apiLimiter, handleDeleteFileRequest);
 
-// Open file or directory in macOS Finder
-app.post('/api/open-in-finder', (req, res) => {
+// Reveal file or directory in Windows File Explorer, macOS Finder, or Linux File Manager
+const handleRevealInFileManager = (req, res) => {
   const { filename } = req.body;
   const ROOT = path.resolve(UPLOADS_DIR);
   let targetPath = ROOT;
 
   if (filename && typeof filename === 'string') {
     const resolved = path.resolve(ROOT, filename);
-    if (!resolved.startsWith(ROOT)) {
+    if (resolved !== ROOT && !resolved.startsWith(ROOT + path.sep)) {
       return res.status(403).json({ error: 'Access denied: Invalid path' });
     }
     targetPath = resolved;
@@ -935,18 +1161,40 @@ app.post('/api/open-in-finder', (req, res) => {
     return res.status(404).json({ error: 'Target path does not exist' });
   }
 
-  // Use execFile with arguments array to avoid shell injection
-  const openArgs = targetPath === ROOT ? [targetPath] : ['-R', targetPath];
-  execFile('open', openArgs, (err) => {
-    if (err) {
-      return res.status(500).json({ error: 'Failed to reveal in Finder' });
-    }
-    res.json({ success: true, opened: path.basename(targetPath) });
-  });
-});
+  const isDirectory = fs.statSync(targetPath).isDirectory();
 
-// Open URL on macOS default browser
-app.post('/api/open-url', (req, res) => {
+  if (isWindows) {
+    const explorerArgs = isDirectory ? [targetPath] : [`/select,${targetPath}`];
+    execFile('explorer.exe', explorerArgs, (err) => {
+      if (err && err.code !== 1) {
+        return res.status(500).json({ error: 'Failed to reveal in File Explorer' });
+      }
+      res.json({ success: true, opened: path.basename(targetPath), platform: 'windows' });
+    });
+  } else if (isMac) {
+    const openArgs = isDirectory ? [targetPath] : ['-R', targetPath];
+    execFile('open', openArgs, (err) => {
+      if (err) {
+        return res.status(500).json({ error: 'Failed to reveal in Finder' });
+      }
+      res.json({ success: true, opened: path.basename(targetPath), platform: 'macos' });
+    });
+  } else {
+    const dirToOpen = isDirectory ? targetPath : path.dirname(targetPath);
+    execFile('xdg-open', [dirToOpen], (err) => {
+      if (err) {
+        return res.status(500).json({ error: 'Failed to reveal file' });
+      }
+      res.json({ success: true, opened: path.basename(targetPath), platform: 'linux' });
+    });
+  }
+};
+
+app.post('/api/open-in-finder', apiLimiter, requireOfficeAuth, handleRevealInFileManager);
+app.post('/api/reveal-file', apiLimiter, requireOfficeAuth, handleRevealInFileManager);
+
+// Open URL on host default browser
+app.post('/api/open-url', apiLimiter, requireOfficeAuth, (req, res) => {
   const { url } = req.body;
   if (!url || typeof url !== 'string') return res.status(400).json({ error: 'No URL provided' });
 
@@ -962,20 +1210,31 @@ app.post('/api/open-url', (req, res) => {
     return res.status(400).json({ error: 'Only HTTP and HTTPS URLs are permitted' });
   }
 
-  // Use execFile with arguments array to avoid shell injection
-  execFile('open', ['--', parsedUrl.href], (err) => {
-    if (err) return res.status(500).json({ error: 'Failed to open URL' });
-    res.json({ success: true, opened: parsedUrl.href });
-  });
+  if (isWindows) {
+    execFile('rundll32.exe', ['url.dll,FileProtocolHandler', parsedUrl.href], (err) => {
+      if (err) return res.status(500).json({ error: 'Failed to open URL' });
+      res.json({ success: true, opened: parsedUrl.href, platform: 'windows' });
+    });
+  } else if (isMac) {
+    execFile('open', ['--', parsedUrl.href], (err) => {
+      if (err) return res.status(500).json({ error: 'Failed to open URL' });
+      res.json({ success: true, opened: parsedUrl.href, platform: 'macos' });
+    });
+  } else {
+    execFile('xdg-open', [parsedUrl.href], (err) => {
+      if (err) return res.status(500).json({ error: 'Failed to open URL' });
+      res.json({ success: true, opened: parsedUrl.href, platform: 'linux' });
+    });
+  }
 });
 
 // Get chat history
-app.get('/api/chat', (req, res) => {
+app.get('/api/chat', requireOfficeAuth, (req, res) => {
   res.json({ messages: appState.chatHistory });
 });
 
 // Clear chat history
-app.post('/api/chat/clear', (req, res) => {
+app.post('/api/chat/clear', apiLimiter, requireOfficeAuth, (req, res) => {
   appState.chatHistory = [];
   saveAppState();
   broadcast({ type: 'chat_cleared' });
@@ -983,12 +1242,12 @@ app.post('/api/chat/clear', (req, res) => {
 });
 
 // Get clipboard history
-app.get('/api/clipboard', (req, res) => {
+app.get('/api/clipboard', requireOfficeAuth, (req, res) => {
   res.json({ items: appState.clipboardHistory });
 });
 
 // Clear clipboard history
-app.post('/api/clipboard/clear', (req, res) => {
+app.post('/api/clipboard/clear', apiLimiter, requireOfficeAuth, (req, res) => {
   appState.clipboardHistory = [];
   saveAppState();
   broadcast({ type: 'clipboard_cleared' });
@@ -1012,23 +1271,34 @@ server.listen(PORT, '0.0.0.0', () => {
   const net = getNetworkIps();
   const primaryUrl = `http://${net.primaryIp}:${PORT}`;
   const localUrl = `http://localhost:${PORT}`;
+  const hostPlatform = isWindows ? 'Windows' : isMac ? 'macOS' : 'Linux';
 
   console.log('\n============================================================');
-  console.log('   AirBridge: macOS <-> Android Connection Server Running   ');
+  console.log('   AirBridge: Multi-Device LAN & Office Connection Running  ');
   console.log('============================================================');
-  console.log(`\n  On your Mac:     ${localUrl}`);
-  console.log(`  On your Android: ${primaryUrl}`);
-  console.log(`  Save Directory:  ${UPLOADS_DIR}\n`);
-  console.log('  Scan this QR Code with your Android camera to connect:\n');
+  console.log(`\n  Host (${hostPlatform}):     ${localUrl}`);
+  console.log(`  Office / Mobile Devices: ${primaryUrl}`);
+  console.log(`  Save Directory:          ${UPLOADS_DIR}\n`);
+  console.log('  Scan this QR Code with your phone camera to connect:\n');
 
   qrcodeTerminal.generate(primaryUrl, { small: true });
 
   console.log('\n============================================================\n');
 
-  // Auto-open browser on Mac if launched interactively
+  // Auto-open browser on host if launched interactively
   if (process.env.AUTO_OPEN !== 'false') {
-    execFile('open', ['--', localUrl], (err) => {
-      if (err) console.log('Notice: open URL automatically skipped:', err.message);
-    });
+    if (isWindows) {
+      execFile('rundll32.exe', ['url.dll,FileProtocolHandler', localUrl], (err) => {
+        if (err) console.log('Notice: auto-open browser skipped');
+      });
+    } else if (isMac) {
+      execFile('open', ['--', localUrl], (err) => {
+        if (err) console.log('Notice: auto-open browser skipped');
+      });
+    } else if (isLinux) {
+      execFile('xdg-open', [localUrl], (err) => {
+        if (err) console.log('Notice: auto-open browser skipped');
+      });
+    }
   }
 });

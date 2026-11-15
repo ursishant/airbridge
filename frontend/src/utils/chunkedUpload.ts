@@ -11,6 +11,14 @@ export interface UploadProgressInfo {
 const CHUNK_SIZE = 10 * 1024 * 1024; // 10MB chunks for rock-solid stability on LAN Wi-Fi
 const LARGE_FILE_THRESHOLD = 20 * 1024 * 1024; // 20MB threshold to switch to chunked streaming
 
+function getStoredOfficePin(): string {
+  try {
+    return localStorage.getItem('airbridge_office_pin') || '';
+  } catch (e) {
+    return '';
+  }
+}
+
 /**
  * Uploads a single large file in 10MB slices to /api/upload-chunk with automatic retries.
  */
@@ -71,6 +79,11 @@ async function uploadSingleFileChunked(
 
           xhr.onerror = () => reject(new Error('Network error during chunk upload'));
           xhr.ontimeout = () => reject(new Error('Chunk upload timed out'));
+
+          const pin = getStoredOfficePin();
+          if (pin) {
+            xhr.setRequestHeader('x-airbridge-pin', pin);
+          }
 
           xhr.send(formData);
         });
@@ -149,6 +162,11 @@ export async function uploadFilesSmartly(
       xhr.onerror = () => reject(new Error('Network error during upload'));
       xhr.ontimeout = () => reject(new Error('Upload timed out'));
 
+      const pin = getStoredOfficePin();
+      if (pin) {
+        xhr.setRequestHeader('x-airbridge-pin', pin);
+      }
+
       xhr.send(formData);
     });
   }
@@ -198,7 +216,12 @@ export async function uploadFilesSmartly(
           }
         };
         xhr.onerror = () => reject(new Error(`Network error uploading ${file.name}`));
-        xhr.send(formData);
+        const pin = getStoredOfficePin();
+      if (pin) {
+        xhr.setRequestHeader('x-airbridge-pin', pin);
+      }
+
+      xhr.send(formData);
       });
     }
 

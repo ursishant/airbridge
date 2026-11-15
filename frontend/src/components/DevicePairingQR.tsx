@@ -24,6 +24,8 @@ interface DevicePairingQRProps {
   serverInfo: ServerInfo | null;
   devices: ConnectedDevice[];
   myDeviceId: string;
+  officeSecurityEnabled?: boolean;
+  officePin?: string;
 }
 
 export const DevicePairingQR: React.FC<DevicePairingQRProps> = ({
@@ -32,13 +34,19 @@ export const DevicePairingQR: React.FC<DevicePairingQRProps> = ({
   serverInfo,
   devices,
   myDeviceId,
+  officeSecurityEnabled = false,
+  officePin = '',
 }) => {
   const [copied, setCopied] = useState(false);
   const [selectedIp, setSelectedIp] = useState<string>('');
 
-  const currentUrl = serverInfo
+  const baseUrl = serverInfo
     ? `http://${selectedIp || serverInfo.primaryIp}:${serverInfo.port}`
-    : window.location.origin;
+    : typeof window !== 'undefined' ? window.location.origin : '';
+
+  const currentUrl = officeSecurityEnabled && officePin
+    ? `${baseUrl}/?pin=${encodeURIComponent(officePin)}`
+    : baseUrl;
 
   const handleCopy = async () => {
     const success = await copyToClipboard(currentUrl);
@@ -84,11 +92,16 @@ export const DevicePairingQR: React.FC<DevicePairingQRProps> = ({
                 <M3AirDropIcon className="w-7 h-7 text-white" filled />
               </div>
               <h2 className="font-display text-xl font-extrabold tracking-tight text-[#0F1115] dark:text-[#F3F4F6]">
-                AirBridge Pairing
+                AirBridge Office Pairing
               </h2>
               <p className="text-xs text-[#64748B] dark:text-[#94A3B8] mt-1 max-w-xs mx-auto">
-                Zero installation required. Scan with your Android camera to connect.
+                Connect Windows PCs, Macs, Android, iPhones & Linux devices on this Wi-Fi.
               </p>
+              {officeSecurityEnabled && officePin && (
+                <div className="mt-2.5 inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-[#10B981]/15 text-[#10B981] border border-[#10B981]/30 text-xs font-mono font-bold">
+                  <span>ROOM PIN: {officePin} (AUTO-EMBEDDED)</span>
+                </div>
+              )}
             </div>
 
             {/* QR Code Container with high contrast border */}

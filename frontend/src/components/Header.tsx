@@ -9,7 +9,8 @@ import {
   M3MoonIcon,
   M3ClipboardIcon,
   M3ChatIcon,
-  M3ToolsIcon
+  M3ToolsIcon,
+  M3ShieldLockIcon
 } from './M3Icons';
 import { AirBridgeEmblem } from './AirBridgeLogo';
 
@@ -22,6 +23,9 @@ interface HeaderProps {
   deviceName: string;
   isAndroid: boolean;
   isMac: boolean;
+  isWindows?: boolean;
+  officeSecurityEnabled?: boolean;
+  officePin?: string;
   theme: 'dark' | 'light';
   activeTab?: TabType;
   onTabChange?: (tab: TabType) => void;
@@ -30,6 +34,7 @@ interface HeaderProps {
   onToggleTheme: () => void;
   onOpenQR: () => void;
   onOpenOnTheGo: () => void;
+  onOpenSecuritySettings?: () => void;
   onUpdateName: (name: string) => void;
   onRingPhone: () => void;
   onPingMac: () => void;
@@ -39,12 +44,15 @@ export const Header: React.FC<HeaderProps> = ({
   isConnected,
   deviceName,
   theme,
+  officeSecurityEnabled = false,
+  officePin = '',
   activeTab = 'files',
   onTabChange,
   chatCount = 0,
   clipboardCount = 0,
   onToggleTheme,
   onOpenQR,
+  onOpenSecuritySettings,
   onUpdateName,
 }) => {
   const [isEditingName, setIsEditingName] = useState(false);
@@ -220,8 +228,23 @@ export const Header: React.FC<HeaderProps> = ({
           </div>
         )}
 
-        {/* Action Controls: Theme Switcher & Pair Phone */}
+        {/* Action Controls: Office Shield, Theme Switcher & Pair Phone */}
         <div className="flex items-center gap-2 shrink-0">
+          {onOpenSecuritySettings && (
+            <button
+              onClick={onOpenSecuritySettings}
+              className={`apple-press flex items-center gap-1.5 px-3 py-1.5 rounded-2xl text-xs font-semibold border transition-all ${
+                officeSecurityEnabled
+                  ? 'bg-[#10B981]/15 text-[#10B981] border-[#10B981]/30 hover:bg-[#10B981]/25'
+                  : 'bg-black/[0.04] dark:bg-white/[0.08] text-[#64748B] dark:text-[#94A3B8] border-black/[0.04] dark:border-white/[0.06] hover:text-[#0F1115] dark:hover:text-white'
+              }`}
+              title="Office Wi-Fi Security & PIN Settings"
+            >
+              <M3ShieldLockIcon className="w-3.5 h-3.5" filled={officeSecurityEnabled} />
+              <span className="hidden sm:inline font-mono">{officeSecurityEnabled ? `PIN: ${officePin}` : 'Office Shield'}</span>
+            </button>
+          )}
+
           {/* Light / Dark Theme Morphing Pill */}
           <button
             onClick={() => {

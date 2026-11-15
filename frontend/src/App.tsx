@@ -17,6 +17,9 @@ import {
   M3ChatIcon,
   M3ToolsIcon,
   M3MacBookIcon,
+  M3WindowsPcIcon,
+  M3IosPhoneIcon,
+  M3LinuxIcon,
   M3PhoneIcon,
   M3SendIcon,
   M3BatteryPill,
@@ -25,6 +28,8 @@ import {
 import { CameraRapidSnap } from './components/CameraRapidSnap';
 import { RingingModal } from './components/RingingModal';
 import { OnTheGoModal } from './components/OnTheGoModal';
+import { OfficeLockModal } from './components/OfficeLockModal';
+import { OfficeSecuritySettingsModal } from './components/OfficeSecuritySettingsModal';
 import { useWebSocket, deduplicateDevices } from './hooks/useWebSocket';
 import { useTheme } from './hooks/useTheme';
 import { scanDataTransferItems, extractFilesFromList, type TraversedFile } from './utils/folderUpload';
@@ -41,6 +46,12 @@ export const App: React.FC = () => {
     serverInfo,
     isAndroid,
     isMac,
+    isWindows,
+    officePin,
+    isOfficeLocked,
+    officeSecurityEnabled,
+    verifyAndSetOfficePin,
+    configureOfficeSecurity,
     clipboardItems,
     chatMessages,
     isRinging,
@@ -52,6 +63,7 @@ export const App: React.FC = () => {
     ringDevice,
     dismissRing,
     pingMac,
+    pingHost,
     sendChatMessage,
     clearChat,
     showToast,
@@ -79,6 +91,7 @@ export const App: React.FC = () => {
   const [isQrOpen, setIsQrOpen] = useState(false);
   const [isCameraSnapOpen, setIsCameraSnapOpen] = useState(false);
   const [isOnTheGoOpen, setIsOnTheGoOpen] = useState(false);
+  const [isOfficeSecurityOpen, setIsOfficeSecurityOpen] = useState(false);
   const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
 
   // Global Drag & Drop State
@@ -294,6 +307,9 @@ export const App: React.FC = () => {
         deviceName={deviceName}
         isAndroid={isAndroid}
         isMac={isMac}
+        isWindows={isWindows}
+        officeSecurityEnabled={officeSecurityEnabled}
+        officePin={officePin}
         theme={theme}
         activeTab={activeTab}
         onTabChange={handleTabChange}
@@ -302,9 +318,10 @@ export const App: React.FC = () => {
         onToggleTheme={toggleTheme}
         onOpenQR={() => setIsQrOpen(true)}
         onOpenOnTheGo={() => setIsOnTheGoOpen(true)}
+        onOpenSecuritySettings={() => setIsOfficeSecurityOpen(true)}
         onUpdateName={updateDeviceName}
         onRingPhone={() => ringDevice('android')}
-        onPingMac={pingMac}
+        onPingMac={pingHost}
       />
 
       {/* Main Container: Full-Width Expansive Executive Bento Canvas */}
@@ -314,7 +331,7 @@ export const App: React.FC = () => {
           <div>
             <div className="flex items-center gap-2.5">
               <h1 className="font-display text-2xl sm:text-3xl font-black text-[#0F1115] dark:text-[#F3F4F6] tracking-tight">
-                {activeTab === 'files' ? 'AirDrop Conduit' : activeTab === 'clipboard' ? 'Live Clipboard' : activeTab === 'chat' ? 'Peer Chat' : 'Remote Suite'}
+                {activeTab === 'files' ? 'Office Shared Folder & AirDrop' : activeTab === 'clipboard' ? 'Live Clipboard' : activeTab === 'chat' ? 'Peer Chat' : 'Remote Suite'}
               </h1>
               <span className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[10px] font-bold font-mono bg-black/[0.04] dark:bg-white/[0.08] text-[#0071E3] dark:text-[#C6F432]">
                 <span className="w-1.5 h-1.5 rounded-full bg-[#10B981] animate-pulse" />
@@ -322,7 +339,7 @@ export const App: React.FC = () => {
               </span>
             </div>
             <p className="text-xs text-[#64748B] dark:text-[#94A3B8] mt-0.5">
-              Zero-cloud peer-to-peer Wi-Fi connection between macOS and Android
+              Direct gigabit LAN transfer across Windows, macOS, Android, iPhone & Linux
             </p>
           </div>
 
@@ -339,7 +356,7 @@ export const App: React.FC = () => {
 
         {/* Executive 4-Card Bento Metric Deck (Salesforce / Cardiology Architecture) */}
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-3.5 sm:gap-4.5">
-          {/* Card 1: Host Mac Hardware */}
+          {/* Card 1: Host Mac/Windows Hardware */}
           <div className="bento-card rounded-3xl p-4 sm:p-5 flex flex-col justify-between transition-transform hover:scale-[1.01]">
             <div className="flex items-center justify-between gap-2">
               <span className="text-[10px] sm:text-[11px] font-bold uppercase tracking-wider text-[#64748B] dark:text-[#94A3B8]">
@@ -352,12 +369,12 @@ export const App: React.FC = () => {
                 {deviceName}
               </h4>
               <p className="text-xs text-[#64748B] dark:text-[#94A3B8] font-mono truncate mt-0.5">
-                {serverInfo?.primaryIp || '127.0.0.1'} • {isMac ? 'macOS' : 'Host'}
+                {serverInfo?.primaryIp || '127.0.0.1'} • {serverInfo?.os || (isWindows ? 'Windows' : isMac ? 'macOS' : 'Host')}
               </p>
             </div>
           </div>
 
-          {/* Card 2: Connected Android Peer */}
+          {/* Card 2: Connected Peer or Office Mesh */}
           <div
             onClick={() => {
               if (!peerDevice) setIsQrOpen(true);
@@ -366,16 +383,16 @@ export const App: React.FC = () => {
           >
             <div className="flex items-center justify-between gap-2">
               <span className="text-[10px] sm:text-[11px] font-bold uppercase tracking-wider text-[#64748B] dark:text-[#94A3B8]">
-                {peerDevice ? 'Live Peer' : 'Peer Target'}
+                {peerDevice ? 'Live Peer' : cleanDevices.length > 1 ? 'Office Mesh' : 'Peer Target'}
               </span>
-              <span className={`w-2 h-2 rounded-full ${peerDevice ? 'bg-[#10B981]' : 'bg-[#F59E0B] animate-pulse'}`} />
+              <span className={`w-2 h-2 rounded-full ${cleanDevices.length > 1 ? 'bg-[#10B981]' : 'bg-[#F59E0B] animate-pulse'}`} />
             </div>
             <div className="mt-3">
               <h4 className="font-display text-base sm:text-lg font-bold text-[#0F1115] dark:text-[#F3F4F6] truncate tracking-tight">
-                {peerDevice ? peerDevice.name : 'Tap to Pair Phone'}
+                {peerDevice ? peerDevice.name : cleanDevices.length > 1 ? `${cleanDevices.length - 1} Office Peers` : 'Tap to Pair Device'}
               </h4>
               <p className="text-xs text-[#64748B] dark:text-[#94A3B8] font-mono truncate mt-0.5">
-                {peerDevice ? `${peerDevice.ip} • P2P Active` : 'Scan QR code to connect'}
+                {peerDevice ? `${peerDevice.ip} • ${peerDevice.os}` : cleanDevices.length > 1 ? 'Windows, Mac, Phone • Direct' : 'Scan QR code to connect'}
               </p>
             </div>
           </div>
@@ -591,6 +608,10 @@ export const App: React.FC = () => {
           serverInfo={serverInfo}
           isMac={isMac}
           isAndroid={isAndroid}
+          isWindows={isWindows}
+          officeSecurityEnabled={officeSecurityEnabled}
+          officePin={officePin}
+          onOpenSecuritySettings={() => setIsOfficeSecurityOpen(true)}
           deviceName={deviceName}
           isUploading={isUploading}
           uploadProgress={uploadProgress}
@@ -603,6 +624,8 @@ export const App: React.FC = () => {
         <FileTransfer
           isAndroid={isAndroid}
           isMac={isMac}
+          isWindows={isWindows}
+          serverInfo={serverInfo}
           recentFiles={recentUploadedFiles}
           showToast={showToast}
           companionDeck={
@@ -626,10 +649,10 @@ export const App: React.FC = () => {
                 </div>
 
                 <div className="space-y-1.5">
-                  {(cleanDevices.length > 0 ? cleanDevices.slice(0, 2) : [
-                    { id: 'host', name: deviceName, os: (isMac ? 'macOS' : 'Host') as any, ip: serverInfo?.primaryIp || '127.0.0.1', connectedAt: Date.now(), battery: null }
+                  {(cleanDevices.length > 0 ? cleanDevices.slice(0, 3) : [
+                    { id: 'host', name: deviceName, os: (isWindows ? 'Windows' : isMac ? 'macOS' : 'Host') as any, ip: serverInfo?.primaryIp || '127.0.0.1', connectedAt: Date.now(), battery: null }
                   ]).map((dev) => {
-                    const isDevMac = dev.os === 'macOS' || dev.name.toLowerCase().includes('mac');
+                    const devOs = dev.os || 'unknown';
                     return (
                       <div
                         key={dev.id}
@@ -637,7 +660,17 @@ export const App: React.FC = () => {
                       >
                         <div className="flex items-center gap-2.5 min-w-0">
                           <div className="w-7 h-7 rounded-lg bg-[#F1F5F9] dark:bg-white/[0.08] flex items-center justify-center shrink-0">
-                            {isDevMac ? <M3MacBookIcon className="w-4 h-4 text-[#0071E3] dark:text-white" active={true} /> : <M3PhoneIcon className="w-4 h-4 text-[#10B981]" active={true} />}
+                            {devOs === 'Windows' ? (
+                              <M3WindowsPcIcon className="w-4 h-4 text-[#0078D4]" active={true} />
+                            ) : devOs === 'macOS' ? (
+                              <M3MacBookIcon className="w-4 h-4 text-[#0071E3] dark:text-white" active={true} />
+                            ) : devOs === 'iOS' ? (
+                              <M3IosPhoneIcon className="w-4 h-4 text-[#6366F1]" active={true} />
+                            ) : devOs === 'Linux' ? (
+                              <M3LinuxIcon className="w-4 h-4 text-[#F59E0B]" />
+                            ) : (
+                              <M3PhoneIcon className="w-4 h-4 text-[#10B981]" active={true} />
+                            )}
                           </div>
                           <div className="min-w-0">
                             <p className="font-display text-xs font-bold text-[#0F1115] dark:text-white truncate">{dev.name}</p>
@@ -648,7 +681,7 @@ export const App: React.FC = () => {
                           <M3BatteryPill level={dev.battery.level} charging={dev.battery.charging} />
                         ) : (
                           <span className="text-[10px] font-semibold text-[#64748B] dark:text-[#94A3B8] bg-black/[0.04] dark:bg-white/[0.06] px-2 py-0.5 rounded-full font-mono">
-                            Host
+                            Node
                           </span>
                         )}
                       </div>
@@ -849,14 +882,32 @@ export const App: React.FC = () => {
   </AnimatePresence>
       </main >
 
-  {/* Modals */ }
-  < DevicePairingQR
-isOpen = { isQrOpen }
-onClose = {() => setIsQrOpen(false)}
-serverInfo = { serverInfo }
-devices = { cleanDevices }
-myDeviceId = { myDeviceId }
-  />
+      {/* Modals */}
+      <DevicePairingQR
+        isOpen={isQrOpen}
+        onClose={() => setIsQrOpen(false)}
+        serverInfo={serverInfo}
+        devices={cleanDevices}
+        myDeviceId={myDeviceId}
+        officeSecurityEnabled={officeSecurityEnabled}
+        officePin={officePin}
+      />
+
+      <OfficeLockModal
+        isOpen={isOfficeLocked}
+        onVerifyPin={verifyAndSetOfficePin}
+        showToast={showToast}
+      />
+
+      <OfficeSecuritySettingsModal
+        isOpen={isOfficeSecurityOpen}
+        onClose={() => setIsOfficeSecurityOpen(false)}
+        officeSecurityEnabled={officeSecurityEnabled}
+        officePin={officePin}
+        serverUrl={serverInfo?.url}
+        onConfigureSecurity={configureOfficeSecurity}
+        showToast={showToast}
+      />
 
       <CameraRapidSnap
         isOpen={isCameraSnapOpen}
@@ -879,7 +930,7 @@ myDeviceId = { myDeviceId }
         ringSource={ringSource}
         onDismiss={dismissRing}
       />
-    </div >
+    </div>
   );
 };
 export default App;
