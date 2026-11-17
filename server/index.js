@@ -1083,9 +1083,14 @@ setInterval(() => {
 }, 60000);
 
 app.post('/api/upload-parallel', apiLimiter, requireOfficeAuth, chunkUpload.single('chunk'), async (req, res) => {
+  const safeChunksDir = path.resolve(CHUNKS_TEMP_DIR);
+  const chunkFileName = path.basename(req.file ? req.file.path : '');
+  const safeChunkPath = path.resolve(safeChunksDir, chunkFileName);
+  const isChunkValid = chunkFileName.length > 0 && safeChunkPath.startsWith(safeChunksDir + path.sep);
+
   const cleanupTempChunk = () => {
-    if (req.file && req.file.path && fs.existsSync(req.file.path)) {
-      try { fs.unlinkSync(req.file.path); } catch (e) {}
+    if (isChunkValid && fs.existsSync(safeChunkPath)) {
+      try { fs.unlinkSync(safeChunkPath); } catch (e) {}
     }
   };
 
@@ -1101,9 +1106,9 @@ app.post('/api/upload-parallel', apiLimiter, requireOfficeAuth, chunkUpload.sing
       fileSize,
     } = req.body;
 
-    if (!req.file || !fileId || chunkIndex === undefined || totalChunks === undefined || !filename) {
+    if (!req.file || !fileId || chunkIndex === undefined || totalChunks === undefined || !filename || !isChunkValid) {
       cleanupTempChunk();
-      return res.status(400).json({ error: 'Missing parallel chunk upload parameters' });
+      return res.status(400).json({ error: 'Missing or invalid parallel chunk upload parameters' });
     }
 
     const cIndex = parseInt(chunkIndex, 10);
@@ -1163,7 +1168,7 @@ app.post('/api/upload-parallel', apiLimiter, requireOfficeAuth, chunkUpload.sing
     }
 
     // Read chunk from disk-backed temporary file and write into .part file at specific offset
-    const chunkBuf = fs.readFileSync(req.file.path);
+    const chunkBuf = fs.readFileSync(safeChunkPath);
     await new Promise((resolve, reject) => {
       fs.write(transfer.fd, chunkBuf, 0, chunkBuf.length, position, (err) => {
         if (err) return reject(err);
