@@ -150,8 +150,41 @@ npm start
 
 1. On your host computer, open `http://localhost:5050` and view the pairing QR code.
 2. Scan the QR code with any mobile camera (Android Camera, Google Lens, or iOS Camera).
-3. For other office laptops or desktop PCs, enter the displayed LAN IP (e.g., `http://192.168.1.42:5050`) in any modern web browser.
+3. For other office laptops or desktop PCs, enter the host computer's displayed LAN IP (e.g., `http://192.168.1.X:5050`) in any modern web browser.
 4. If Office Room PIN protection is active, peers enter the 4-digit PIN (or join automatically via the camera QR scan).
+
+---
+
+## How to Uninstall
+
+If you ever wish to stop or completely remove AirBridge from your system:
+
+### 1. Stop & Remove Background Auto-Start Service
+
+- **On macOS**:
+  ```bash
+  ./uninstall-service.sh
+  ```
+  *Stops the background daemon, unloads `launchd`, removes `~/Library/LaunchAgents/com.airbridge.server.plist`, and frees port `5050`.*
+
+- **On Windows**:
+  ```cmd
+  uninstall-service-windows.bat
+  ```
+  *Removes the startup task from `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup` and stops the background process.*
+
+- **On Linux / Terminal Mode**:
+  If running interactively (`./start.sh` or `npm start`), press `Ctrl + C` in your terminal.
+
+### 2. Remove Repository & Saved Data (Optional)
+
+- To remove the cloned project directory:
+  ```bash
+  rm -rf airbridge
+  ```
+- To remove received files from disk:
+  - **macOS / Linux**: `rm -rf ~/Downloads/AirBridge`
+  - **Windows**: Delete the `AirBridge` folder in your `Downloads` directory.
 
 ---
 
