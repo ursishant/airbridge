@@ -6,6 +6,7 @@ export interface TraversedFile {
 /**
  * Recursively scans files and directories from DataTransfer items (drag and drop)
  * using the HTML5 FileSystem API (webkitGetAsEntry).
+ * Reads full binary files without dropping or filtering any files.
  */
 export async function scanDataTransferItems(items: DataTransferItemList | null): Promise<TraversedFile[]> {
   if (!items || items.length === 0) return [];
@@ -16,10 +17,10 @@ export async function scanDataTransferItems(items: DataTransferItemList | null):
     if (!entry) return;
 
     if (entry.isFile) {
+      const rel = currentPath ? `${currentPath}/${entry.name}` : entry.name;
       return new Promise<void>((resolve) => {
         entry.file(
           (file: File) => {
-            const rel = currentPath ? `${currentPath}/${file.name}` : file.name;
             results.push({ file, relativePath: rel });
             resolve();
           },
@@ -43,7 +44,7 @@ export async function scanDataTransferItems(items: DataTransferItemList | null):
                 for (const child of entries) {
                   await traverseEntry(child, nextPath);
                 }
-                // Directory reader might return entries in batches of 100, so recurse
+                // Directory reader returns entries in batches, recurse until complete
                 readBatch();
               }
             },
@@ -96,4 +97,49 @@ export function extractFilesFromList(fileList: FileList): TraversedFile[] {
     });
   }
   return results;
+}
+
+/**
+ * Uses modern native File System Access API (showDirectoryPicker) to pick and recursively traverse a directory.
+ * Native macOS/Windows folder picker where entire folders can be cleanly selected.
+ * Bypasses Chrome's raw "Upload X files to this site?" prompt and gives full control to AirBridge UI.
+ * Reads every file into genuine File objects so everything is uploaded without omissions.
+ * Returns null if showDirectoryPicker is unsupported, or empty array if user canceled.
+ */
+export async function pickAndTraverseDirectory(): Promise<TraversedFile[] | null> {
+  if (typeof window !== 'undefined' && typeof (window as any).showDirectoryPicker === 'function') {
+    try {
+      const dirHandle = await (window as any).showDirectoryPicker();
+      if (!dirHandle) return [];
+
+      const results: TraversedFile[] = [];
+
+      async function scanHandle(handle: any, currentPath: string): Promise<void> {
+        for await (const [name, entry] of handle.entries()) {
+          const entryPath = currentPath ? `${currentPath}/${name}` : name;
+          if (entry.kind === 'file') {
+            try {
+              const file = await entry.getFile();
+              results.push({ file, relativePath: entryPath });
+            } catch (err) {
+              console.warn('Failed to read file handle:', entryPath, err);
+            }
+          } else if (entry.kind === 'directory') {
+            await scanHandle(entry, entryPath);
+          }
+        }
+      }
+
+      await scanHandle(dirHandle, dirHandle.name);
+      return results;
+    } catch (err: any) {
+      if (err.name === 'AbortError') {
+        // User voluntarily dismissed the picker dialog
+        return [];
+      }
+      console.warn('showDirectoryPicker failed, falling back:', err);
+      return null;
+    }
+  }
+  return null;
 }

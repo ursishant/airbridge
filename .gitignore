@@ -32,6 +32,7 @@ yarn-error.log*
 .env.local
 .env.*.local
 .airbridge_state.json
+scratch/
 
 # IDE & Editors
 .vscode/*

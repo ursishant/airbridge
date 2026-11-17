@@ -86,7 +86,10 @@ export const FileTransfer: React.FC<FileTransferProps> = ({
   };
 
   useEffect(() => {
-    fetchFiles();
+    const timer = setTimeout(() => {
+      fetchFiles();
+    }, 1000);
+    return () => clearTimeout(timer);
   }, [recentFiles]);
 
   // Synchronize deletions from WebSocket broadcasts across all connected tabs/devices

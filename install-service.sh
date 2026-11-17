@@ -43,5 +43,35 @@ EOF
 
 launchctl unload ~/Library/LaunchAgents/com.airbridge.server.plist 2>/dev/null || true
 launchctl load ~/Library/LaunchAgents/com.airbridge.server.plist
-echo "[Success] AirBridge background auto-start service installed. Runs 24/7 silently."
+
+# Wait briefly for daemon to initialize port
+sleep 1.2
+
+PRIMARY_IP=$(ipconfig getifaddr en0 2>/dev/null || echo "localhost")
+if command -v curl &>/dev/null; then
+    INFO=$(curl -s http://localhost:5050/api/info 2>/dev/null || echo "")
+    if [ -n "$INFO" ]; then
+        DETECTED_IP=$(echo "$INFO" | grep -o '"primaryIp":"[^"]*' | cut -d'"' -f4)
+        if [ -n "$DETECTED_IP" ]; then
+            PRIMARY_IP="$DETECTED_IP"
+        fi
+    fi
+fi
+
+echo ""
+echo "============================================================"
+echo "   AirBridge: Background Auto-Start Service Installed!      "
+echo "============================================================"
+echo ""
+echo "  Host (This Mac):         http://localhost:5050"
+echo "  Office / Mobile Devices: http://${PRIMARY_IP}:5050"
+echo "  Save Directory:          ~/Downloads/AirBridge"
+echo ""
+echo "  [Status] Running silently in the background 24/7."
+echo "  AirBridge starts automatically whenever this Mac boots."
+echo "  Opening http://localhost:5050 in your browser..."
+echo "============================================================"
+echo ""
+
+open "http://localhost:5050" 2>/dev/null || true
 

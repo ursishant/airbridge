@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { SoundEffects } from '../components/SoundEffects';
+import type { ToastInfo } from '../components/DynamicIsland';
 
 export interface ConnectedDevice {
   id: string;
@@ -163,7 +164,7 @@ export function useWebSocket() {
   const [isRinging, setIsRinging] = useState(false);
   const [ringSource, setRingSource] = useState<string>('');
   const [recentUploadedFiles, setRecentUploadedFiles] = useState<UploadedFileItem[]>([]);
-  const [activeToast, setActiveToast] = useState<string | null>(null);
+  const [activeToast, setActiveToast] = useState<ToastInfo | string | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<any>(null);
@@ -225,11 +226,18 @@ export function useWebSocket() {
     }
   }, [devices]);
 
-  const showToast = useCallback((msg: string) => {
-    setActiveToast(msg);
+  const showToast = useCallback((msg: string, type?: 'info' | 'success' | 'error' | 'warning') => {
+    const detectedType = type || (
+      /fail|error|denied|reject|timed out|abort/i.test(msg) ? 'error' :
+      /success|beamed|synced|uploaded|unlocked|installed|received/i.test(msg) ? 'success' :
+      /warning|incorrect|disconnected|caution/i.test(msg) ? 'warning' :
+      'info'
+    );
+    const toastObj: ToastInfo = { message: msg, type: detectedType, id: Date.now() };
+    setActiveToast(toastObj);
     setTimeout(() => {
-      setActiveToast((curr) => (curr === msg ? null : curr));
-    }, 4000);
+      setActiveToast((curr: any) => (curr?.id === toastObj.id ? null : curr));
+    }, 4500);
   }, []);
 
   const connect = useCallback(() => {
@@ -267,7 +275,10 @@ export function useWebSocket() {
           }
         } catch (e) {}
 
-        if (!batteryInfo && (isMac || isWindows)) {
+        // /api/battery reports the HOST machine, so only fetch it when this page
+        // is opened on the host itself — never from a remote LAN browser.
+        const isHostPage = ['localhost', '127.0.0.1', '::1'].includes(window.location.hostname);
+        if (!batteryInfo && (isMac || isWindows) && isHostPage) {
           try {
             const res = await fetch('/api/battery', {
               headers: officePinRef.current ? { 'x-airbridge-pin': officePinRef.current } : {},

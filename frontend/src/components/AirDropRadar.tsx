@@ -17,7 +17,7 @@ import {
   M3ShieldLockIcon,
   M3BatteryPill
 } from './M3Icons';
-import { scanDataTransferItems, extractFilesFromList, type TraversedFile } from '../utils/folderUpload';
+import { scanDataTransferItems, extractFilesFromList, pickAndTraverseDirectory, type TraversedFile } from '../utils/folderUpload';
 
 interface AirDropRadarProps {
   devices: ConnectedDevice[];
@@ -34,7 +34,7 @@ interface AirDropRadarProps {
   onOpenSecuritySettings?: () => void;
   onOpenQR: () => void;
   onRingDevice: (target: 'android' | 'mac') => void;
-  onDropFiles: (files: TraversedFile[] | FileList | File[]) => void;
+  onDropFiles: (files: TraversedFile[] | FileList | File[], isFromInput?: boolean) => void;
   onOpenCameraSnap?: () => void;
 }
 
@@ -103,24 +103,46 @@ export const AirDropRadar: React.FC<AirDropRadarProps> = ({
     if (e.dataTransfer) {
       const scanned = await scanDataTransferItems(e.dataTransfer.items);
       if (scanned.length > 0) {
-        onDropFiles(scanned);
+        onDropFiles(scanned, false);
         return;
       }
       if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-        onDropFiles(extractFilesFromList(e.dataTransfer.files));
+        onDropFiles(extractFilesFromList(e.dataTransfer.files), false);
       }
     }
   };
 
   const handleFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
-      onDropFiles(extractFilesFromList(e.target.files));
+      onDropFiles(extractFilesFromList(e.target.files), true);
     }
   };
 
   const handleFolderInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
-      onDropFiles(extractFilesFromList(e.target.files));
+      onDropFiles(extractFilesFromList(e.target.files), true);
+    }
+  };
+
+  const handlePickFolder = async () => {
+    // 1. Modern native File System Access API (Desktop Chrome / Edge / Opera)
+    // Directly opens the native OS folder picker with "Select Folder" / "Upload"
+    const scanned = await pickAndTraverseDirectory();
+    if (scanned !== null) {
+      if (scanned.length > 0) {
+        onDropFiles(scanned, true);
+      }
+      return;
+    }
+
+    // 2. Fallback to standard input element with explicit DOM properties for Safari / Firefox
+    if (folderInputRef.current) {
+      folderInputRef.current.value = '';
+      (folderInputRef.current as any).webkitdirectory = true;
+      (folderInputRef.current as any).directory = true;
+      folderInputRef.current.setAttribute('webkitdirectory', '');
+      folderInputRef.current.setAttribute('directory', '');
+      folderInputRef.current.click();
     }
   };
 
@@ -135,11 +157,16 @@ export const AirDropRadar: React.FC<AirDropRadarProps> = ({
         onChange={handleFileInputChange}
       />
       <input
-        ref={folderInputRef}
+        ref={(el) => {
+          folderInputRef.current = el;
+          if (el) {
+            (el as any).webkitdirectory = true;
+            (el as any).directory = true;
+            el.setAttribute('webkitdirectory', '');
+            el.setAttribute('directory', '');
+          }
+        }}
         type="file"
-        // @ts-ignore
-        webkitdirectory="true"
-        directory=""
         multiple
         className="hidden"
         onChange={handleFolderInputChange}
@@ -341,8 +368,7 @@ export const AirDropRadar: React.FC<AirDropRadarProps> = ({
 
           {/* Row 2: Seamless Magnetic Drag & Drop Capsule */}
           <div
-            onClick={() => fileInputRef.current?.click()}
-            className={`w-full py-9 px-6 rounded-2xl border-2 border-dashed text-center cursor-pointer transition-all ${
+            className={`w-full py-8 px-6 rounded-2xl border-2 border-dashed text-center transition-all ${
               isDraggingStage
                 ? 'border-[#0071E3] dark:border-[#C6F432] bg-[#0071E3]/[0.05] dark:bg-[#C6F432]/[0.05] scale-[1.008]'
                 : 'border-black/[0.08] dark:border-white/[0.1] hover:border-black/[0.2] dark:hover:border-white/[0.2] bg-[#F8FAFC]/50 dark:bg-[#151924]/40'
@@ -360,15 +386,33 @@ export const AirDropRadar: React.FC<AirDropRadarProps> = ({
                   Nested directory trees preserved on disk in <code className="px-1.5 py-0.5 rounded bg-black/[0.04] dark:bg-white/[0.08] font-mono text-[11px] text-[#0F1115] dark:text-[#F3F4F6]">~/Downloads/AirBridge</code> • Up to 10GB
                 </p>
               </div>
+
+              {/* Action Buttons within Drop Zone */}
+              <div className="flex items-center gap-2.5 mt-1">
+                <button
+                  type="button"
+                  onClick={handlePickFolder}
+                  className="apple-press flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold bg-[#F59E0B]/10 hover:bg-[#F59E0B]/20 text-[#D97706] dark:text-[#FBBF24] border border-[#F59E0B]/25 transition-colors shadow-xs"
+                >
+                  <FolderUp className="w-4 h-4 text-inherit" />
+                  <span>Choose Folder</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  className="apple-press flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold bg-black/[0.05] hover:bg-black/[0.08] dark:bg-white/[0.08] dark:hover:bg-white/[0.12] text-[#0F1115] dark:text-white border border-black/[0.06] dark:border-white/[0.08] transition-colors shadow-xs"
+                >
+                  <M3FolderIcon className="w-4 h-4 text-[#0071E3] dark:text-[#38BDF8]" />
+                  <span>Choose Files</span>
+                </button>
+              </div>
             </div>
           </div>
 
           {/* Row 3: 4 Tactile Action Chips */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
             <button
-              onClick={() => {
-                folderInputRef.current?.click();
-              }}
+              onClick={handlePickFolder}
               className="apple-press min-h-[48px] flex items-center justify-center gap-2.5 px-4 py-2.5 rounded-2xl text-xs font-bold bg-[#F8FAFC] dark:bg-[#161B28] hover:bg-black/[0.04] dark:hover:bg-white/[0.08] text-[#0F1115] dark:text-[#F3F4F6] border border-black/[0.06] dark:border-white/[0.08] shadow-sm transition-colors"
               title="Upload entire folder with folder hierarchy preserved"
             >

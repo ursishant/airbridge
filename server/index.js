@@ -4,13 +4,32 @@ const { WebSocketServer, WebSocket } = require('ws');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
-const { exec, execFile } = require('child_process');
+const { exec, execFile, spawn } = require('child_process');
 const crypto = require('crypto');
 const multer = require('multer');
 const cors = require('cors');
+let compression = null;
+try {
+  compression = require('compression');
+} catch (e) {}
 const rateLimit = require('express-rate-limit');
 const { ZipArchive } = require('archiver');
 const qrcodeTerminal = require('qrcode-terminal');
+const { resolveUploadTarget } = require('./lib/uploadPaths');
+
+// Global safety crash guards for unhandled async rejections or orphaned handles
+process.on('uncaughtException', (err) => {
+  console.error('[AirBridge Server] Uncaught Exception:', err);
+  // A listen failure is always fatal (the server cannot serve without its
+  // socket): exit instead of idling as a zombie process.
+  if (err && err.syscall === 'listen') {
+    console.error('[AirBridge Server] Fatal: cannot listen, exiting.');
+    process.exit(1);
+  }
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[AirBridge Server] Unhandled Rejection:', reason);
+});
 
 const PORT = process.env.PORT || 5050;
 
@@ -158,74 +177,139 @@ function playHostAlertSound() {
   }
 }
 
-const app = express();
-app.use(cors());
 
-// Global API rate limiter protecting all routes from DDoS and resource exhaustion
+
+// Function to resolve all local IP addresses of the host machine
+function getHostIpSet() {
+  const hostIps = new Set([
+    '127.0.0.1',
+    '::1',
+    'localhost',
+    'local',
+    '1',
+    '0.0.0.0',
+    '::',
+  ]);
+  try {
+    const interfaces = os.networkInterfaces();
+    for (const name of Object.keys(interfaces)) {
+      for (const iface of interfaces[name]) {
+        if (iface.address) {
+          hostIps.add(iface.address.toLowerCase());
+        }
+      }
+    }
+  } catch (e) {}
+  return hostIps;
+}
+
+function isHostRequest(req) {
+  const rawRemote = (req.socket.remoteAddress || '').toLowerCase();
+  const cleanRemote = rawRemote.replace(/^::ffff:/, '');
+  const hostIps = getHostIpSet();
+
+  if (hostIps.has(cleanRemote) || hostIps.has(rawRemote)) {
+    return true;
+  }
+  if (req.hostname === 'localhost' || req.hostname === '127.0.0.1') {
+    return true;
+  }
+  return false;
+}
+
+const app = express();
+app.set('trust proxy', 1);
+app.use(cors());
+if (compression) {
+  app.use(compression({
+    filter: (req, res) => {
+      const url = req.originalUrl || req.url || '';
+      if (url.includes('/api/files') || url.includes('/api/download') || url.includes('/api/upload')) {
+        return false; // Skip compression for all binary and transfer streams
+      }
+      return compression.filter(req, res);
+    }
+  }));
+}
+
+// Cache-Control: no-cache for all API responses
+app.use('/api', (req, res, next) => {
+  res.setHeader('Cache-Control', 'no-cache');
+  next();
+});
+
+// Generous rate limiter for control/auth endpoints (never throttles file transfers or local LAN traffic)
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 3000,
+  max: 50000,
   standardHeaders: true,
   legacyHeaders: false,
+  validate: { trustProxy: false },
+  skip: (req) => {
+    if (isHostRequest(req)) return true;
+    const url = req.originalUrl || req.url || '';
+    if (url.includes('/upload') || url.includes('/files') || url.includes('/download')) return true;
+    return false;
+  },
 });
-app.use(apiLimiter);
 
 // Dedicated strict rate limiter for Office Room PIN verification to prevent brute-forcing
 const pinAuthLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 30, // maximum 30 attempts per 15 minutes
+  max: 50, // maximum 50 attempts per 15 minutes
   message: { error: 'Too many PIN verification attempts. Please wait 15 minutes.' },
   standardHeaders: true,
   legacyHeaders: false,
+  validate: { trustProxy: false },
 });
 
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-// Configure multer for file uploads with folder structure preservation
+// Configure multer for file uploads with robust directory structure preservation
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
-    let pathsArray = [];
-    try {
-      if (req.body && req.body.paths) {
-        pathsArray = typeof req.body.paths === 'string' ? JSON.parse(req.body.paths) : req.body.paths;
-      }
-    } catch (e) {}
-
-    if (req._fileIndex === undefined) req._fileIndex = 0;
-    const currentRel = (Array.isArray(pathsArray) && pathsArray[req._fileIndex]) 
-      ? pathsArray[req._fileIndex] 
-      : (file.originalname || '');
-    req._currentRelPath = currentRel;
-
-    // Normalize slashes and strip any dangerous .. or absolute path prefixes
-    let clean = currentRel.replace(/\\/g, '/').replace(/^(\.\.[\/\\])+/, '').replace(/^\/+/, '');
-    const dirPart = path.dirname(clean);
-    const targetDir = (dirPart && dirPart !== '.') ? path.join(UPLOADS_DIR, dirPart) : UPLOADS_DIR;
+    let rawRel = file.originalname || '';
+    if (req.body && req.body.paths) {
+      try {
+        const pathsArray = typeof req.body.paths === 'string' ? JSON.parse(req.body.paths) : req.body.paths;
+        if (req._fileIndex === undefined) req._fileIndex = 0;
+        if (Array.isArray(pathsArray) && pathsArray[req._fileIndex]) {
+          rawRel = pathsArray[req._fileIndex];
+        }
+      } catch (e) {}
+    }
+    // Resolve through the containment helper so crafted paths can never
+    // escape the vault via mid-path ../ sequences.
+    const target = resolveUploadTarget(UPLOADS_DIR, rawRel);
+    file._cleanRelPath = target.cleanRel;
 
     try {
-      if (!fs.existsSync(targetDir)) {
-        fs.mkdirSync(targetDir, { recursive: true });
+      if (!fs.existsSync(target.targetDir)) {
+        fs.mkdirSync(target.targetDir, { recursive: true });
       }
-      cb(null, targetDir);
+      cb(null, target.targetDir);
     } catch (err) {
       cb(err, UPLOADS_DIR);
     }
   },
   filename: function (req, file, cb) {
-    let clean = (req._currentRelPath || file.originalname || 'file').replace(/\\/g, '/');
-    let fileName = path.basename(clean);
-    const dirPart = path.dirname(clean);
-    const targetDir = (dirPart && dirPart !== '.') ? path.join(UPLOADS_DIR, dirPart) : UPLOADS_DIR;
+    const target = resolveUploadTarget(UPLOADS_DIR, file._cleanRelPath || file.originalname || 'file');
+    const targetDir = target.targetDir;
 
-    const destPath = path.join(targetDir, fileName);
-    if (fs.existsSync(destPath)) {
-      const ext = path.extname(fileName);
-      const base = path.basename(fileName, ext);
-      fileName = `${base}_${Date.now()}${ext}`;
+    // For single root files, avoid overwriting by appending timestamp if file exists.
+    // For structured folder uploads, preserve original file name for exact project mirroring.
+    let finalName = target.fileName;
+    if (!target.isNested) {
+      const destPath = path.join(targetDir, finalName);
+      if (fs.existsSync(destPath)) {
+        const ext = path.extname(finalName);
+        const base = path.basename(finalName, ext);
+        finalName = `${base}_${Date.now()}${ext}`;
+      }
     }
     req._fileIndex = (req._fileIndex || 0) + 1;
-    cb(null, fileName);
+    cb(null, finalName);
   },
 });
 const upload = multer({
@@ -256,16 +340,28 @@ const chunkStorage = multer.diskStorage({
 
 const chunkUpload = multer({
   storage: chunkStorage,
-  limits: { fileSize: 50 * 1024 * 1024 }, // 50MB max per individual chunk
+  limits: { fileSize: 64 * 1024 * 1024 }, // 64MB max per individual chunk
+});
+
+// Memory storage for zero-copy direct-positioned writes
+const memoryChunkUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 64 * 1024 * 1024 },
 });
 
 // Create HTTP and WebSocket server with zero timeout for giant transfers
 const server = http.createServer(app);
 server.requestTimeout = 0; // Disable request timeout
 server.headersTimeout = 0; // Disable headers timeout
-server.keepAliveTimeout = 120000; // 2 minutes keep-alive
+server.keepAliveTimeout = 300000; // 5 minutes keep-alive for parallel transfers
 server.timeout = 0; // No socket timeout
 const wss = new WebSocketServer({ server });
+wss.on('error', (err) => {
+  // Prevent unhandled WebSocket error crashing process when server port is occupied
+  if (err && err.code !== 'EADDRINUSE') {
+    console.error('[WebSocket Error]', err);
+  }
+});
 
 // Persistent Application State (Chat history, Clipboard history, Known paired devices, Office Room Security)
 const STATE_FILE = path.join(UPLOADS_DIR, '.airbridge_state.json');
@@ -313,43 +409,7 @@ function saveAppState() {
   }
 }
 
-// Function to resolve all local IP addresses of the host machine
-function getHostIpSet() {
-  const hostIps = new Set([
-    '127.0.0.1',
-    '::1',
-    'localhost',
-    'local',
-    '1',
-    '0.0.0.0',
-    '::',
-  ]);
-  try {
-    const interfaces = os.networkInterfaces();
-    for (const name of Object.keys(interfaces)) {
-      for (const iface of interfaces[name]) {
-        if (iface.address) {
-          hostIps.add(iface.address.toLowerCase());
-        }
-      }
-    }
-  } catch (e) {}
-  return hostIps;
-}
 
-function isHostRequest(req) {
-  const rawRemote = (req.socket.remoteAddress || '').toLowerCase();
-  const cleanRemote = rawRemote.replace(/^::ffff:/, '');
-  const hostIps = getHostIpSet();
-
-  if (hostIps.has(cleanRemote) || hostIps.has(rawRemote)) {
-    return true;
-  }
-  if (req.hostname === 'localhost' || req.hostname === '127.0.0.1') {
-    return true;
-  }
-  return false;
-}
 
 // Office Room Security Authorization helpers
 function isAuthorizedRequest(req) {
@@ -381,6 +441,10 @@ function requireOfficeAuth(req, res, next) {
 // Connected devices state (active live sockets)
 const connectedClients = new Map();
 
+// In-memory cache for /api/files list (2-second TTL during high-throughput transfers)
+let cachedFilesList = null;
+let lastFilesListTime = 0;
+
 // Helper to broadcast WebSocket messages
 function broadcast(message, excludeWs = null) {
   const data = JSON.stringify(message);
@@ -389,6 +453,32 @@ function broadcast(message, excludeWs = null) {
       client.send(data);
     }
   });
+}
+
+// Throttled broadcast for files_uploaded — coalesces into 1 broadcast per second during bulk uploads
+let pendingUploadFiles = [];
+let pendingUploadSender = '';
+let uploadBroadcastTimer = null;
+
+function broadcastFilesUploaded(files, sender) {
+  pendingUploadFiles.push(...files);
+  pendingUploadSender = sender || pendingUploadSender || 'Unknown Device';
+  if (!uploadBroadcastTimer) {
+    uploadBroadcastTimer = setTimeout(() => {
+      const batch = pendingUploadFiles;
+      const batchSender = pendingUploadSender;
+      pendingUploadFiles = [];
+      pendingUploadSender = '';
+      uploadBroadcastTimer = null;
+      // Invalidate file list cache so next /api/files returns fresh data
+      cachedFilesList = null;
+      broadcast({
+        type: 'files_uploaded',
+        files: batch,
+        sender: batchSender,
+      });
+    }, 1000);
+  }
 }
 
 function getUniqueDevices() {
@@ -558,8 +648,8 @@ wss.on('connection', (ws, req) => {
           const persistentId = msg.payload?.id || current.id || clientId;
 
           let clientBattery = msg.payload?.battery;
-          if (!clientBattery && (msg.payload?.os === 'macOS' || isMac)) {
-            clientBattery = await getMacBattery();
+          if (!clientBattery && ws.isHost) {
+            clientBattery = await getHostBattery();
           }
           const updatedDevice = {
             ...current,
@@ -716,7 +806,7 @@ function getDirectoryStats(dirPath) {
     try {
       const items = fs.readdirSync(current);
       for (const item of items) {
-        if (item.startsWith('.')) continue;
+        if (item === '.DS_Store' || item === 'Thumbs.db') continue;
         const full = path.join(current, item);
         const st = fs.statSync(full);
         if (st.isDirectory()) {
@@ -813,7 +903,7 @@ app.post('/api/office/configure', apiLimiter, requireOfficeAuth, (req, res) => {
 });
 
 // Upload endpoint (supports full recursive folder beaming up to 1000 files)
-app.post('/api/upload', apiLimiter, requireOfficeAuth, upload.array('files', 1000), (req, res) => {
+app.post('/api/upload', requireOfficeAuth, upload.array('files', 1000), (req, res) => {
   if (!req.files || req.files.length === 0) {
     return res.status(400).json({ error: 'No files uploaded' });
   }
@@ -836,12 +926,8 @@ app.post('/api/upload', apiLimiter, requireOfficeAuth, upload.array('files', 100
     };
   });
 
-  // Broadcast WebSocket notification to all clients
-  broadcast({
-    type: 'files_uploaded',
-    files: uploadedFiles,
-    sender: req.body.sender || 'Unknown Device',
-  });
+  // Broadcast WebSocket notification to all clients (throttled to 1/sec during bulk uploads)
+  broadcastFilesUploaded(uploadedFiles, req.body.sender || 'Unknown Device');
 
   res.json({
     success: true,
@@ -850,7 +936,7 @@ app.post('/api/upload', apiLimiter, requireOfficeAuth, upload.array('files', 100
 });
 
 // Resumable Chunked Upload for arbitrarily large files (1GB, 5GB, 10GB+)
-app.post('/api/upload-chunk', apiLimiter, requireOfficeAuth, chunkUpload.single('chunk'), async (req, res) => {
+app.post('/api/upload-chunk', requireOfficeAuth, chunkUpload.single('chunk'), async (req, res) => {
   const safeChunksDir = path.resolve(CHUNKS_TEMP_DIR);
   const chunkFileName = path.basename(req.file ? req.file.path : '');
   const safeChunkPath = path.resolve(safeChunksDir, chunkFileName);
@@ -883,14 +969,15 @@ app.post('/api/upload-chunk', apiLimiter, requireOfficeAuth, chunkUpload.single(
     const ROOT = path.resolve(UPLOADS_DIR);
     const resolvedFinalPath = path.resolve(ROOT, relativePath || filename);
 
-    // Path traversal check
-    if (!resolvedFinalPath.startsWith(ROOT)) {
+    // Path traversal check (strict separator prefix so sibling dirs like
+    // "AirBridgeBackup" can never pass)
+    if (!resolvedFinalPath.startsWith(ROOT + path.sep)) {
       cleanupChunk();
       return res.status(403).json({ error: 'Access denied: Path traversal detected' });
     }
 
     const targetDir = path.dirname(resolvedFinalPath);
-    if (!targetDir.startsWith(ROOT)) {
+    if (targetDir !== ROOT && !targetDir.startsWith(ROOT + path.sep)) {
       cleanupChunk();
       return res.status(403).json({ error: 'Access denied: Invalid directory' });
     }
@@ -903,7 +990,7 @@ app.post('/api/upload-chunk', apiLimiter, requireOfficeAuth, chunkUpload.single(
     const safeFileId = String(fileId).replace(/[^a-zA-Z0-9_-]/g, '');
     const resolvedTempPath = path.resolve(targetDir, `.${baseName}.${safeFileId}.part`);
 
-    if (!resolvedTempPath.startsWith(ROOT)) {
+    if (!resolvedTempPath.startsWith(ROOT + path.sep)) {
       cleanupChunk();
       return res.status(403).json({ error: 'Access denied: Invalid temp path' });
     }
@@ -956,12 +1043,8 @@ app.post('/api/upload-chunk', apiLimiter, requireOfficeAuth, chunkUpload.single(
         uploadedAt: Date.now(),
       };
 
-      // Broadcast WebSocket notification to all clients
-      broadcast({
-        type: 'files_uploaded',
-        files: [fileInfo],
-        sender: sender || 'Unknown Device',
-      });
+      // Broadcast WebSocket notification to all clients (throttled to 1/sec during bulk uploads)
+      broadcastFilesUploaded([fileInfo], sender || 'Unknown Device');
 
       return res.json({
         success: true,
@@ -983,8 +1066,227 @@ app.post('/api/upload-chunk', apiLimiter, requireOfficeAuth, chunkUpload.single(
   }
 });
 
+// =====================================================================
+// High-Speed Direct-Positioned Parallel Chunk Upload
+// Zero temp chunk files, zero concatenation pass, zero CPU thrashing
+// Chunks are written directly into target file at byte offset via pwrite
+// =====================================================================
+const activeTransfers = new Map();
+
+// Periodic reaper for abandoned/stale partial uploads
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, t] of activeTransfers.entries()) {
+    if (now - t.lastActivity > 10 * 60 * 1000) {
+      try { if (t.fd) fs.closeSync(t.fd); } catch (e) {}
+      try { if (fs.existsSync(t.partPath)) fs.unlinkSync(t.partPath); } catch (e) {}
+      activeTransfers.delete(id);
+    }
+  }
+}, 60000);
+
+app.post('/api/upload-parallel', requireOfficeAuth, memoryChunkUpload.single('chunk'), async (req, res) => {
+  try {
+    const {
+      fileId,
+      chunkIndex,
+      totalChunks,
+      chunkSize,
+      filename,
+      relativePath,
+      sender,
+      fileSize,
+    } = req.body;
+
+    if (!req.file || !fileId || chunkIndex === undefined || totalChunks === undefined || !filename) {
+      return res.status(400).json({ error: 'Missing parallel chunk upload parameters' });
+    }
+
+    const cIndex = parseInt(chunkIndex, 10);
+    const tChunks = parseInt(totalChunks, 10);
+    const cSize = parseInt(chunkSize, 10) || (16 * 1024 * 1024);
+    const safeFileId = String(fileId).replace(/[^a-zA-Z0-9_-]/g, '');
+    const position = cIndex * cSize;
+
+    let transfer = activeTransfers.get(safeFileId);
+    if (!transfer) {
+      const ROOT = path.resolve(UPLOADS_DIR);
+      let cleanRel = (relativePath || filename).replace(/\\/g, '/').replace(/^(\.\.[\/\\])+/, '').replace(/^\/+/, '');
+      const resolvedFinalPath = path.resolve(ROOT, cleanRel);
+
+      if (!resolvedFinalPath.startsWith(ROOT + path.sep)) {
+        return res.status(403).json({ error: 'Access denied: Path traversal detected' });
+      }
+
+      const targetDir = path.dirname(resolvedFinalPath);
+      if (!fs.existsSync(targetDir)) {
+        fs.mkdirSync(targetDir, { recursive: true });
+      }
+
+      const baseName = path.basename(resolvedFinalPath);
+      const partPath = path.resolve(targetDir, `.${baseName}.${safeFileId}.part`);
+      
+      // Synchronous open guarantees atomic single file descriptor allocation across concurrent chunks
+      const fd = fs.openSync(partPath, fs.existsSync(partPath) ? 'r+' : 'w+');
+
+      transfer = {
+        fd,
+        targetDir,
+        baseName,
+        partPath,
+        resolvedFinalPath,
+        received: new Set(),
+        totalChunks: tChunks,
+        filename,
+        relativePath: cleanRel,
+        sender: sender || 'Unknown Device',
+        fileSize: parseInt(fileSize, 10) || 0,
+        lastActivity: Date.now(),
+      };
+      activeTransfers.set(safeFileId, transfer);
+    }
+
+    // Direct atomic positioned write into .part file via fs.write with integer fd
+    await new Promise((resolve, reject) => {
+      fs.write(transfer.fd, req.file.buffer, 0, req.file.buffer.length, position, (err) => {
+        if (err) return reject(err);
+        resolve();
+      });
+    });
+
+    transfer.received.add(cIndex);
+    transfer.lastActivity = Date.now();
+
+    // Check if all chunks have arrived – instant finalization!
+    if (transfer.received.size >= tChunks) {
+      try {
+        fs.closeSync(transfer.fd);
+      } catch (e) {
+        console.warn('Error closing fd on completion:', e);
+      }
+      activeTransfers.delete(safeFileId);
+
+      let finalDest = transfer.resolvedFinalPath;
+      const isInsideFolder = transfer.relativePath.includes('/');
+      if (fs.existsSync(finalDest)) {
+        if (!isInsideFolder) {
+          const ext = path.extname(transfer.baseName);
+          const base = path.basename(transfer.baseName, ext);
+          finalDest = path.join(transfer.targetDir, `${base}_${Date.now()}${ext}`);
+        } else {
+          try { fs.unlinkSync(finalDest); } catch (e) {}
+        }
+      }
+
+      fs.renameSync(transfer.partPath, finalDest);
+
+      const stats = fs.statSync(finalDest);
+      const relFromUploads = path.relative(UPLOADS_DIR, finalDest).replace(/\\/g, '/');
+      const topFolder = isInsideFolder ? relFromUploads.split('/')[0] : null;
+
+      const fileInfo = {
+        name: path.basename(finalDest),
+        originalName: transfer.filename,
+        relativePath: relFromUploads,
+        folder: topFolder,
+        size: stats.size,
+        mimetype: req.file.mimetype || 'application/octet-stream',
+        path: `/api/files/${relFromUploads.split('/').map(encodeURIComponent).join('/')}`,
+        fullPath: finalDest,
+        uploadedAt: Date.now(),
+      };
+
+      broadcastFilesUploaded([fileInfo], transfer.sender);
+
+      return res.json({
+        success: true,
+        completed: true,
+        file: fileInfo,
+      });
+    }
+
+    // Acknowledge intermediate chunk
+    res.json({
+      success: true,
+      completed: false,
+      chunkIndex: cIndex,
+      receivedCount: transfer.received.size,
+      totalChunks: tChunks,
+    });
+  } catch (err) {
+    console.error('Error in /api/upload-parallel:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// =====================================================================
+// Ranged File Download – supports HTTP Range requests for parallel download
+// Frontend can request multiple byte ranges simultaneously for faster transfers
+// =====================================================================
+app.get(/^\/api\/files-ranged\/(.*)/, requireOfficeAuth, (req, res) => {
+  const reqPath = decodeURIComponent(req.params[0] || '');
+  const ROOT = path.resolve(UPLOADS_DIR);
+  const filePath = path.resolve(ROOT, reqPath);
+
+  // Path traversal check (strict separator prefix)
+  if (!filePath.startsWith(ROOT + path.sep)) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({ error: 'File not found' });
+  }
+
+  const stat = fs.statSync(filePath);
+  if (!stat.isFile()) {
+    return res.status(400).json({ error: 'Not a file' });
+  }
+
+  const fileSize = stat.size;
+  const filename = path.basename(filePath);
+
+  // Always set these headers
+  res.setHeader('Accept-Ranges', 'bytes');
+  res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"; filename*=UTF-8''${encodeURIComponent(filename)}`);
+  res.setHeader('Cache-Control', 'private, max-age=86400, no-transform');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+
+  const rangeHeader = req.headers.range;
+  if (rangeHeader) {
+    // Parse Range header: "bytes=start-end"
+    const match = rangeHeader.match(/bytes=(\d+)-(\d*)/);
+    if (!match) {
+      res.setHeader('Content-Range', `bytes */${fileSize}`);
+      return res.status(416).json({ error: 'Invalid Range header' });
+    }
+
+    const start = parseInt(match[1], 10);
+    const end = match[2] ? parseInt(match[2], 10) : fileSize - 1;
+
+    if (start >= fileSize || end >= fileSize || start > end) {
+      res.setHeader('Content-Range', `bytes */${fileSize}`);
+      return res.status(416).json({ error: 'Range Not Satisfiable' });
+    }
+
+    const contentLength = end - start + 1;
+    res.status(206);
+    res.setHeader('Content-Range', `bytes ${start}-${end}/${fileSize}`);
+    res.setHeader('Content-Length', contentLength);
+    res.setHeader('Content-Type', 'application/octet-stream');
+
+    const stream = fs.createReadStream(filePath, { start, end, highWaterMark: 4 * 1024 * 1024 });
+    stream.pipe(res);
+  } else {
+    // No Range header – serve full file with Content-Length
+    res.setHeader('Content-Length', fileSize);
+    res.setHeader('Content-Type', 'application/octet-stream');
+    const stream = fs.createReadStream(filePath, { highWaterMark: 4 * 1024 * 1024 });
+    stream.pipe(res);
+  }
+});
+
 // Instant Camera Snap upload via multipart form-data (multer diskStorage)
-app.post('/api/upload-snap', apiLimiter, requireOfficeAuth, upload.single('file'), (req, res) => {
+app.post('/api/upload-snap', requireOfficeAuth, upload.single('file'), (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'No image uploaded' });
@@ -1009,6 +1311,7 @@ app.post('/api/upload-snap', apiLimiter, requireOfficeAuth, upload.single('file'
       });
     }
 
+    cachedFilesList = null;
     broadcast({
       type: 'files_uploaded',
       files: [fileInfo],
@@ -1022,8 +1325,14 @@ app.post('/api/upload-snap', apiLimiter, requireOfficeAuth, upload.single('file'
   }
 });
 
-// List files and folders in transfer directory
+// List files and folders in transfer directory (with 2-second high-throughput caching)
+
 app.get('/api/files', requireOfficeAuth, (req, res) => {
+  const now = Date.now();
+  if (cachedFilesList && (now - lastFilesListTime < 2000)) {
+    return res.json({ files: cachedFilesList });
+  }
+
   fs.readdir(UPLOADS_DIR, (err, items) => {
     if (err) {
       return res.status(500).json({ error: 'Failed to read directory' });
@@ -1061,6 +1370,8 @@ app.get('/api/files', requireOfficeAuth, (req, res) => {
 
     // Sort newest first
     files.sort((a, b) => b.modifiedAt - a.modifiedAt);
+    cachedFilesList = files;
+    lastFilesListTime = now;
     res.json({ files });
   });
 });
@@ -1071,8 +1382,8 @@ app.get(/^\/api\/files\/(.*)/, requireOfficeAuth, (req, res) => {
   const ROOT = path.resolve(UPLOADS_DIR);
   const filePath = path.resolve(ROOT, reqPath);
 
-  // Path traversal check
-  if (!filePath.startsWith(ROOT)) {
+  // Path traversal check (strict separator prefix)
+  if (!filePath.startsWith(ROOT + path.sep)) {
     return res.status(403).json({ error: 'Forbidden' });
   }
 
@@ -1081,10 +1392,46 @@ app.get(/^\/api\/files\/(.*)/, requireOfficeAuth, (req, res) => {
   }
 
   const filename = path.basename(filePath);
+  const stat = fs.statSync(filePath);
+  if (!stat.isFile()) {
+    return res.status(400).json({ error: 'Not a file' });
+  }
+
+  const fileSize = stat.size;
+  res.setHeader('Accept-Ranges', 'bytes');
   res.setHeader('Content-Type', 'application/octet-stream');
   res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"; filename*=UTF-8''${encodeURIComponent(filename)}`);
+  res.setHeader('Cache-Control', 'private, max-age=86400, no-transform');
   res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.download(filePath, filename);
+
+  const rangeHeader = req.headers.range;
+  if (rangeHeader) {
+    const match = rangeHeader.match(/bytes=(\d+)-(\d*)/);
+    if (!match) {
+      res.setHeader('Content-Range', `bytes */${fileSize}`);
+      return res.status(416).json({ error: 'Invalid Range header' });
+    }
+
+    const start = parseInt(match[1], 10);
+    const end = match[2] ? parseInt(match[2], 10) : fileSize - 1;
+
+    if (start >= fileSize || end >= fileSize || start > end) {
+      res.setHeader('Content-Range', `bytes */${fileSize}`);
+      return res.status(416).json({ error: 'Range Not Satisfiable' });
+    }
+
+    const contentLength = end - start + 1;
+    res.status(206);
+    res.setHeader('Content-Range', `bytes ${start}-${end}/${fileSize}`);
+    res.setHeader('Content-Length', contentLength);
+
+    const stream = fs.createReadStream(filePath, { start, end, highWaterMark: 4 * 1024 * 1024 });
+    stream.pipe(res);
+  } else {
+    res.setHeader('Content-Length', fileSize);
+    const stream = fs.createReadStream(filePath, { highWaterMark: 4 * 1024 * 1024 });
+    stream.pipe(res);
+  }
 });
 
 // Stream or view raw file
@@ -1093,7 +1440,8 @@ app.get(/^\/api\/files-raw\/(.*)/, requireOfficeAuth, (req, res) => {
   const ROOT = path.resolve(UPLOADS_DIR);
   const filePath = path.resolve(ROOT, reqPath);
 
-  if (!filePath.startsWith(ROOT)) {
+  // Path traversal check (strict separator prefix)
+  if (!filePath.startsWith(ROOT + path.sep)) {
     return res.status(403).json({ error: 'Forbidden' });
   }
 
@@ -1104,46 +1452,96 @@ app.get(/^\/api\/files-raw\/(.*)/, requireOfficeAuth, (req, res) => {
   res.sendFile(filePath);
 });
 
-// Download entire folder as a ZIP archive on demand with secure headers
+// Download entire folder as a ZIP archive on demand (instant native C zip streaming at line rate)
 app.get(/^\/api\/download-folder\/(.*)/, requireOfficeAuth, (req, res) => {
   const folderRelPath = decodeURIComponent(req.params[0] || '');
   const ROOT = path.resolve(UPLOADS_DIR);
   const folderPath = path.resolve(ROOT, folderRelPath);
 
-  if (!folderPath.startsWith(ROOT) || !fs.existsSync(folderPath)) {
+  if ((folderPath !== ROOT && !folderPath.startsWith(ROOT + path.sep)) || !fs.existsSync(folderPath)) {
     return res.status(404).json({ error: 'Folder not found' });
   }
 
   const folderName = path.basename(folderPath);
-  const archive = new ZipArchive({ zlib: { level: 6 } });
-
   res.setHeader('Content-Type', 'application/zip');
   res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(folderName)}.zip"; filename*=UTF-8''${encodeURIComponent(folderName)}.zip`);
+  res.setHeader('Cache-Control', 'private, max-age=86400, no-transform');
   res.setHeader('X-Content-Type-Options', 'nosniff');
 
-  archive.on('error', (err) => {
-    res.status(500).send({ error: err.message });
-  });
+  const zipBinary = fs.existsSync('/usr/bin/zip') ? '/usr/bin/zip' : (fs.existsSync('/usr/local/bin/zip') ? '/usr/local/bin/zip' : null);
 
-  archive.pipe(res);
-  archive.directory(folderPath, folderName);
-  archive.finalize();
+  if (zipBinary) {
+    const parentDir = path.dirname(folderPath);
+    const targetDirName = path.basename(folderPath);
+
+    const zipProcess = spawn(zipBinary, ['-0', '-q', '-r', '-', targetDirName], {
+      cwd: parentDir,
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+
+    zipProcess.stdout.pipe(res);
+
+    req.on('close', () => {
+      if (!zipProcess.killed) {
+        try { zipProcess.kill('SIGTERM'); } catch (e) {}
+      }
+    });
+
+    zipProcess.on('error', (err) => {
+      console.error('[Native Zip Error]:', err);
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Failed to stream folder archive' });
+      }
+    });
+  } else {
+    const archive = new ZipArchive({ zlib: { level: 0 }, highWaterMark: 4 * 1024 * 1024 });
+    archive.on('error', (err) => {
+      if (!res.headersSent) res.status(500).send({ error: err.message });
+    });
+    archive.pipe(res);
+    archive.directory(folderPath, folderName);
+    archive.finalize();
+  }
 });
 
-// Download all files as a ZIP archive with secure headers
+// Download all files as a ZIP archive (instant native C zip streaming)
 app.get('/api/download-zip', requireOfficeAuth, (req, res) => {
-  const archive = new ZipArchive({ zlib: { level: 6 } });
   res.setHeader('Content-Type', 'application/zip');
   res.setHeader('Content-Disposition', 'attachment; filename="AirBridge_Files.zip"');
+  res.setHeader('Cache-Control', 'private, max-age=86400, no-transform');
   res.setHeader('X-Content-Type-Options', 'nosniff');
 
-  archive.on('error', (err) => {
-    res.status(500).send({ error: err.message });
-  });
+  const zipBinary = fs.existsSync('/usr/bin/zip') ? '/usr/bin/zip' : (fs.existsSync('/usr/local/bin/zip') ? '/usr/local/bin/zip' : null);
 
-  archive.pipe(res);
-  archive.directory(UPLOADS_DIR, false);
-  archive.finalize();
+  if (zipBinary) {
+    const zipProcess = spawn(zipBinary, ['-0', '-q', '-r', '-', '.', '-x', '.*', '*/.*', '.chunks_temp/*'], {
+      cwd: UPLOADS_DIR,
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+
+    zipProcess.stdout.pipe(res);
+
+    req.on('close', () => {
+      if (!zipProcess.killed) {
+        try { zipProcess.kill('SIGTERM'); } catch (e) {}
+      }
+    });
+
+    zipProcess.on('error', (err) => {
+      console.error('[Native Zip All Error]:', err);
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Failed to stream files archive' });
+      }
+    });
+  } else {
+    const archive = new ZipArchive({ zlib: { level: 0 }, highWaterMark: 4 * 1024 * 1024 });
+    archive.on('error', (err) => {
+      if (!res.headersSent) res.status(500).send({ error: err.message });
+    });
+    archive.pipe(res);
+    archive.directory(UPLOADS_DIR, false);
+    archive.finalize();
+  }
 });
 
 // Safe deletion function for files and entire folders
@@ -1156,7 +1554,7 @@ function deleteFileOrDirectory(targetName) {
   const targetPath = path.resolve(ROOT, targetName);
 
   // Security: prevent path traversal outside UPLOADS_DIR
-  if (!targetPath.startsWith(ROOT) || targetPath === ROOT) {
+  if (targetPath === ROOT || !targetPath.startsWith(ROOT + path.sep)) {
     throw new Error('Access denied: cannot delete outside root uploads folder');
   }
 
@@ -1193,6 +1591,7 @@ const handleDeleteFileRequest = (req, res) => {
     const deleted = deleteFileOrDirectory(filename);
     if (deleted) {
       console.log('[Vault] Successfully deleted file');
+      cachedFilesList = null;
       broadcast({ type: 'file_deleted', filename });
       return res.json({ success: true, filename });
     }
@@ -1214,7 +1613,7 @@ const handleRevealInFileManager = (req, res) => {
   const cleanFilename = path.normalize(rawFilename).replace(/^(\.\.[\/\\])+/, '');
   const targetPath = cleanFilename ? path.resolve(ROOT, cleanFilename) : ROOT;
 
-  if (!targetPath.startsWith(ROOT)) {
+  if (targetPath !== ROOT && !targetPath.startsWith(ROOT + path.sep)) {
     return res.status(403).json({ error: 'Access denied: Invalid path' });
   }
 
@@ -1327,7 +1726,66 @@ if (fs.existsSync(publicDir)) {
   });
 }
 
-// Start Server
+// Global Express error handler (absorbs client aborts and network resets cleanly)
+app.use((err, req, res, next) => {
+  if (err && (err.message === 'Request aborted' || err.code === 'ECONNRESET' || err.type === 'request.aborted')) {
+    return res.status(499).end();
+  }
+  console.error('[Express Error]', err);
+  if (!res.headersSent) {
+    res.status(500).json({ error: err?.message || 'Server error' });
+  }
+});
+
+// A fatal listen failure (port in use, permission denied)
+function failToStart(err) {
+  if (err && err.code === 'EADDRINUSE') {
+    // Check if AirBridge is already running in the background on this port
+    const req = http.get(`http://localhost:${PORT}/api/info`, (res) => {
+      let raw = '';
+      res.on('data', (chunk) => { raw += chunk; });
+      res.on('end', () => {
+        try {
+          const info = JSON.parse(raw);
+          const localUrl = `http://localhost:${PORT}`;
+          const mobileUrl = info.url || `http://${info.primaryIp}:${PORT}`;
+          console.log('\n============================================================');
+          console.log('   AirBridge is ALREADY running in the background!          ');
+          console.log('============================================================');
+          console.log(`\n  Host (${isMac ? 'macOS' : isWindows ? 'Windows' : 'Linux'}):     ${localUrl}`);
+          console.log(`  Office / Mobile Devices: ${mobileUrl}`);
+          console.log(`  Save Directory:          ${info.downloadsDir || '~/Downloads/AirBridge'}\n`);
+          console.log('  Opening AirBridge in your browser now...\n');
+          console.log('============================================================\n');
+
+          if (isMac) {
+            execFile('open', ['--', localUrl], () => {});
+          } else if (isWindows) {
+            execFile('rundll32.exe', ['url.dll,FileProtocolHandler', localUrl], () => {});
+          } else if (isLinux) {
+            execFile('xdg-open', [localUrl], () => {});
+          }
+          process.exit(0);
+        } catch (e) {
+          console.error(`\n[AirBridge Error] Port ${PORT} is already in use by another application.\n`);
+          process.exit(1);
+        }
+      });
+    });
+    req.on('error', () => {
+      console.error(`\n[AirBridge Error] Port ${PORT} is already in use by another application.`);
+      console.error(`To use another port, run: PORT=5051 npm start\n`);
+      process.exit(1);
+    });
+    return;
+  }
+  console.error(`[AirBridge Server] Failed to start on port ${PORT}:`, err && err.message ? err.message : err);
+  process.exit(1);
+}
+server.on('error', failToStart);
+
+// Start Server (sync listen throws are caught; async failures hit 'error' above)
+try {
 server.listen(PORT, '0.0.0.0', () => {
   const net = getNetworkIps();
   const primaryUrl = `http://${net.primaryIp}:${PORT}`;
@@ -1363,3 +1821,6 @@ server.listen(PORT, '0.0.0.0', () => {
     }
   }
 });
+} catch (err) {
+  failToStart(err);
+}

@@ -30,6 +30,7 @@ import { RingingModal } from './components/RingingModal';
 import { OnTheGoModal } from './components/OnTheGoModal';
 import { OfficeLockModal } from './components/OfficeLockModal';
 import { OfficeSecuritySettingsModal } from './components/OfficeSecuritySettingsModal';
+import { FolderBeamModal } from './components/FolderBeamModal';
 import { useWebSocket, deduplicateDevices } from './hooks/useWebSocket';
 import { useTheme } from './hooks/useTheme';
 import { scanDataTransferItems, extractFilesFromList, type TraversedFile } from './utils/folderUpload';
@@ -99,6 +100,12 @@ export const App: React.FC = () => {
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
 
+  // Folder Beam Confirmation Alert state (styled to website design system)
+  const [pendingFolderUpload, setPendingFolderUpload] = useState<{
+    folderName: string;
+    files: TraversedFile[];
+  } | null>(null);
+
   // Window-level Drag & Drop detection for immersive AirDrop feel
   useEffect(() => {
     let dragCounter = 0;
@@ -152,27 +159,14 @@ export const App: React.FC = () => {
     };
   }, [deviceName]);
 
-  const handleGlobalUpload = async (items: TraversedFile[] | FileList | File[]) => {
-    if (!items || items.length === 0) return;
-
-    let normalized: TraversedFile[] = [];
-    if (items instanceof FileList) {
-      normalized = extractFilesFromList(items);
-    } else if (Array.isArray(items)) {
-      if (items.length > 0 && 'relativePath' in items[0]) {
-        normalized = items as TraversedFile[];
-      } else {
-        normalized = (items as File[]).map(f => ({ file: f, relativePath: (f as any).webkitRelativePath || f.name }));
-      }
-    }
-
-    if (normalized.length === 0) return;
+  const executeUpload = async (files: TraversedFile[]) => {
+    if (!files || files.length === 0) return;
 
     setIsUploading(true);
     setUploadProgress(5);
 
     try {
-      await uploadFilesSmartly(normalized, deviceName, (progressInfo) => {
+      await uploadFilesSmartly(files, deviceName, (progressInfo) => {
         setUploadProgress(progressInfo.percent);
       });
 
@@ -184,13 +178,66 @@ export const App: React.FC = () => {
         origin: { y: 0.2 },
         colors: ['#0071E3', '#34C759', '#5AC8FA'],
       });
-      const hasFolder = normalized.some(item => item.relativePath.includes('/'));
-      showToast(hasFolder ? `Beamed folder structure (${normalized.length} files)` : `Beamed ${normalized.length} file(s)`);
+      const hasFolder = files.some((item) => item.relativePath.includes('/'));
+      showToast(
+        hasFolder
+          ? `Beamed folder structure (${files.length.toLocaleString()} files)`
+          : `Beamed ${files.length} file(s)`,
+        'success'
+      );
     } catch (err: any) {
       setIsUploading(false);
       setUploadProgress(0);
-      showToast(err.message || 'Transfer failed');
+      showToast(err.message || 'Transfer failed', 'error');
     }
+  };
+
+  const handleGlobalUpload = async (items: TraversedFile[] | FileList | File[], isFromInput = false) => {
+    if (!items || (items as any).length === 0) return;
+
+    let normalized: TraversedFile[] = [];
+    if (items instanceof FileList) {
+      normalized = extractFilesFromList(items);
+    } else if (Array.isArray(items)) {
+      if (items.length > 0 && 'relativePath' in items[0]) {
+        normalized = items as TraversedFile[];
+      } else {
+        normalized = (items as File[]).map((f) => ({
+          file: f,
+          relativePath: (f as any).webkitRelativePath || f.name,
+        }));
+      }
+    }
+
+    if (normalized.length === 0) return;
+
+    // If selected via folder input picker: Chrome has already confirmed with the user,
+    // so start beaming immediately with zero redundant prompts!
+    if (isFromInput) {
+      await executeUpload(normalized);
+      return;
+    }
+
+    // If dragged & dropped onto the AirBridge radar: show our website's custom alert confirmation
+    const hasDirectoryStructure = normalized.some((item) => item.relativePath.includes('/'));
+    if (hasDirectoryStructure || normalized.length > 15) {
+      let rootFolderName = 'Beam Folder';
+      const sample = normalized.find((item) => item.relativePath.includes('/'));
+      if (sample) {
+        rootFolderName = sample.relativePath.split('/')[0];
+      } else if (normalized.length > 0) {
+        rootFolderName = `${normalized.length} Items`;
+      }
+
+      setPendingFolderUpload({
+        folderName: rootFolderName,
+        files: normalized,
+      });
+      return;
+    }
+
+    // Direct upload for single files or small batches
+    await executeUpload(normalized);
   };
 
   // Capture PWA install prompt on Android / Chrome
@@ -230,14 +277,17 @@ export const App: React.FC = () => {
   });
 
   useEffect(() => {
-    fetch('/api/files')
-      .then((r) => r.json())
-      .then((d) => {
-        if (d.files && Array.isArray(d.files)) {
-          setVaultFileCount(d.files.length);
-        }
-      })
-      .catch(() => { });
+    const timer = setTimeout(() => {
+      fetch('/api/files')
+        .then((r) => r.json())
+        .then((d) => {
+          if (d.files && Array.isArray(d.files)) {
+            setVaultFileCount(d.files.length);
+          }
+        })
+        .catch(() => { });
+    }, 1000);
+    return () => clearTimeout(timer);
   }, [recentUploadedFiles]);
 
   const handleTabChange = (tab: TabType) => {
@@ -461,144 +511,144 @@ export const App: React.FC = () => {
     )
   }
 
-  {/* Mobile-Only Bento Segmented Navigation Bar (Salesforce Architecture) */ }
-  <div className="flex md:hidden justify-center pb-1">
-    <div className="relative inline-flex items-center bento-nav-track">
-      {/* AirDrop Tab */}
-      <button
-        onClick={() => handleTabChange('files')}
-        className={`apple-press relative z-10 flex items-center gap-1 sm:gap-1.5 px-3 py-1.5 rounded-xl text-xs transition-colors shrink-0 ${activeTab === 'files'
-          ? 'text-white dark:text-[#0A0D14] font-bold'
-          : 'text-[#64748B] dark:text-[#94A3B8] hover:text-[#0F1115] dark:hover:text-white font-medium'
-          }`}
-      >
-        {activeTab === 'files' && (
-          <motion.div
-            layoutId="activeBentoTabPill"
-            className="absolute inset-0 bg-[#0F1115] dark:bg-[#C6F432] rounded-xl shadow-sm dark:shadow-[0_2px_12px_rgba(198,244,50,0.35)]"
-            transition={{ type: "spring", stiffness: 450, damping: 32 }}
-          />
-        )}
-        <span className="relative z-10 flex items-center gap-1 sm:gap-1.5">
-          <M3AirDropIcon
-            className={`w-3.5 h-3.5 ${activeTab === 'files'
-              ? 'text-white dark:text-[#0A0D14]'
-              : 'text-[#0071E3] dark:text-[#38BDF8]'
-              }`}
-            filled={activeTab === 'files'}
-          />
-          <span className="font-display tracking-tight">AirDrop</span>
-        </span>
-      </button>
+        {/* Mobile-Only Bento Segmented Navigation Bar (Equal Touch Targets & Smooth iOS Pill) */}
+        <div className="flex md:hidden justify-center pb-2 px-1">
+          <div className="w-full max-w-sm grid grid-cols-4 p-1 rounded-2xl bg-black/[0.04] dark:bg-white/[0.06] border border-black/[0.04] dark:border-white/[0.06] relative">
+            {/* AirDrop Tab */}
+            <button
+              onClick={() => handleTabChange('files')}
+              className={`apple-press relative z-10 flex items-center justify-center gap-1 py-2 px-1 rounded-xl text-xs transition-colors shrink-0 ${activeTab === 'files'
+                ? 'text-white dark:text-[#0A0D14] font-bold'
+                : 'text-[#64748B] dark:text-[#94A3B8] hover:text-[#0F1115] dark:hover:text-white font-medium'
+                }`}
+            >
+              {activeTab === 'files' && (
+                <motion.div
+                  layoutId="activeBentoTabPill"
+                  className="absolute inset-0 bg-[#0F1115] dark:bg-[#C6F432] rounded-xl shadow-sm dark:shadow-[0_2px_10px_rgba(198,244,50,0.3)]"
+                  transition={{ type: "spring", bounce: 0.14, duration: 0.28 }}
+                />
+              )}
+              <span className="relative z-10 flex items-center gap-1">
+                <M3AirDropIcon
+                  className={`w-3.5 h-3.5 ${activeTab === 'files'
+                    ? 'text-white dark:text-[#0A0D14]'
+                    : 'text-[#0071E3] dark:text-[#38BDF8]'
+                    }`}
+                  filled={activeTab === 'files'}
+                />
+                <span className="font-display tracking-tight text-[11px] sm:text-xs">AirDrop</span>
+              </span>
+            </button>
 
-      {/* Live Clipboard Tab */}
-      <button
-        onClick={() => handleTabChange('clipboard')}
-        className={`apple-press relative z-10 flex items-center gap-1 sm:gap-1.5 px-3 py-1.5 rounded-xl text-xs transition-colors shrink-0 ${activeTab === 'clipboard'
-          ? 'text-white dark:text-[#0A0D14] font-bold'
-          : 'text-[#64748B] dark:text-[#94A3B8] hover:text-[#0F1115] dark:hover:text-white font-medium'
-          }`}
-      >
-        {activeTab === 'clipboard' && (
-          <motion.div
-            layoutId="activeBentoTabPill"
-            className="absolute inset-0 bg-[#0F1115] dark:bg-[#C6F432] rounded-xl shadow-sm dark:shadow-[0_2px_12px_rgba(198,244,50,0.35)]"
-            transition={{ type: "spring", stiffness: 450, damping: 32 }}
-          />
-        )}
-        <span className="relative z-10 flex items-center gap-1 sm:gap-1.5">
-          <M3ClipboardIcon
-            className={`w-3.5 h-3.5 ${activeTab === 'clipboard'
-              ? 'text-white dark:text-[#0A0D14]'
-              : 'text-[#10B981] dark:text-[#34D399]'
-              }`}
-            filled={activeTab === 'clipboard'}
-          />
-          <span className="font-display tracking-tight">Clipboard</span>
-          {clipboardItems.length > 0 && (
-            <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono tabular-nums ${activeTab === 'clipboard'
-              ? 'bg-white/20 dark:bg-black/20 text-inherit'
-              : 'bg-black/[0.06] dark:bg-white/[0.08] text-[#64748B] dark:text-[#94A3B8]'
-              }`}>
-              {clipboardItems.length}
-            </span>
-          )}
-        </span>
-      </button>
+            {/* Live Clipboard Tab */}
+            <button
+              onClick={() => handleTabChange('clipboard')}
+              className={`apple-press relative z-10 flex items-center justify-center gap-1 py-2 px-1 rounded-xl text-xs transition-colors shrink-0 ${activeTab === 'clipboard'
+                ? 'text-white dark:text-[#0A0D14] font-bold'
+                : 'text-[#64748B] dark:text-[#94A3B8] hover:text-[#0F1115] dark:hover:text-white font-medium'
+                }`}
+            >
+              {activeTab === 'clipboard' && (
+                <motion.div
+                  layoutId="activeBentoTabPill"
+                  className="absolute inset-0 bg-[#0F1115] dark:bg-[#C6F432] rounded-xl shadow-sm dark:shadow-[0_2px_10px_rgba(198,244,50,0.3)]"
+                  transition={{ type: "spring", bounce: 0.14, duration: 0.28 }}
+                />
+              )}
+              <span className="relative z-10 flex items-center gap-1">
+                <M3ClipboardIcon
+                  className={`w-3.5 h-3.5 ${activeTab === 'clipboard'
+                    ? 'text-white dark:text-[#0A0D14]'
+                    : 'text-[#10B981] dark:text-[#34D399]'
+                    }`}
+                  filled={activeTab === 'clipboard'}
+                />
+                <span className="font-display tracking-tight text-[11px] sm:text-xs">Clip</span>
+                {clipboardItems.length > 0 && (
+                  <span className={`text-[9px] px-1 py-0.2 rounded-full font-mono tabular-nums ${activeTab === 'clipboard'
+                    ? 'bg-white/20 dark:bg-black/20 text-inherit'
+                    : 'bg-black/[0.06] dark:bg-white/[0.08] text-[#64748B] dark:text-[#94A3B8]'
+                    }`}>
+                    {clipboardItems.length}
+                  </span>
+                )}
+              </span>
+            </button>
 
-      {/* Chat Tab */}
-      <button
-        onClick={() => handleTabChange('chat')}
-        className={`apple-press relative z-10 flex items-center gap-1 sm:gap-1.5 px-3 py-1.5 rounded-xl text-xs transition-colors shrink-0 ${activeTab === 'chat'
-          ? 'text-white dark:text-[#0A0D14] font-bold'
-          : 'text-[#64748B] dark:text-[#94A3B8] hover:text-[#0F1115] dark:hover:text-white font-medium'
-          }`}
-      >
-        {activeTab === 'chat' && (
-          <motion.div
-            layoutId="activeBentoTabPill"
-            className="absolute inset-0 bg-[#0F1115] dark:bg-[#C6F432] rounded-xl shadow-sm dark:shadow-[0_2px_12px_rgba(198,244,50,0.35)]"
-            transition={{ type: "spring", stiffness: 450, damping: 32 }}
-          />
-        )}
-        <span className="relative z-10 flex items-center gap-1 sm:gap-1.5">
-          <M3ChatIcon
-            className={`w-3.5 h-3.5 ${activeTab === 'chat'
-              ? 'text-white dark:text-[#0A0D14]'
-              : 'text-[#0071E3] dark:text-[#38BDF8]'
-              }`}
-            filled={activeTab === 'chat'}
-          />
-          <span className="font-display tracking-tight">Chat</span>
-          {chatMessages.length > 0 && (
-            <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono font-bold tabular-nums ${activeTab === 'chat'
-              ? 'bg-white/20 dark:bg-black/20 text-inherit'
-              : 'bg-[#0071E3]/15 dark:bg-white/10 text-[#0071E3] dark:text-[#38BDF8]'
-              }`}>
-              {chatMessages.length}
-            </span>
-          )}
-        </span>
-      </button>
+            {/* Chat Tab */}
+            <button
+              onClick={() => handleTabChange('chat')}
+              className={`apple-press relative z-10 flex items-center justify-center gap-1 py-2 px-1 rounded-xl text-xs transition-colors shrink-0 ${activeTab === 'chat'
+                ? 'text-white dark:text-[#0A0D14] font-bold'
+                : 'text-[#64748B] dark:text-[#94A3B8] hover:text-[#0F1115] dark:hover:text-white font-medium'
+                }`}
+            >
+              {activeTab === 'chat' && (
+                <motion.div
+                  layoutId="activeBentoTabPill"
+                  className="absolute inset-0 bg-[#0F1115] dark:bg-[#C6F432] rounded-xl shadow-sm dark:shadow-[0_2px_10px_rgba(198,244,50,0.3)]"
+                  transition={{ type: "spring", bounce: 0.14, duration: 0.28 }}
+                />
+              )}
+              <span className="relative z-10 flex items-center gap-1">
+                <M3ChatIcon
+                  className={`w-3.5 h-3.5 ${activeTab === 'chat'
+                    ? 'text-white dark:text-[#0A0D14]'
+                    : 'text-[#0071E3] dark:text-[#38BDF8]'
+                    }`}
+                  filled={activeTab === 'chat'}
+                />
+                <span className="font-display tracking-tight text-[11px] sm:text-xs">Chat</span>
+                {chatMessages.length > 0 && (
+                  <span className={`text-[9px] px-1 py-0.2 rounded-full font-mono font-bold tabular-nums ${activeTab === 'chat'
+                    ? 'bg-white/20 dark:bg-black/20 text-inherit'
+                    : 'bg-[#0071E3]/15 dark:bg-white/10 text-[#0071E3] dark:text-[#38BDF8]'
+                    }`}>
+                    {chatMessages.length}
+                  </span>
+                )}
+              </span>
+            </button>
 
-      {/* Remote & Tools Tab */}
-      <button
-        onClick={() => handleTabChange('tools')}
-        className={`apple-press relative z-10 flex items-center gap-1 sm:gap-1.5 px-3 py-1.5 rounded-xl text-xs transition-colors shrink-0 ${activeTab === 'tools'
-          ? 'text-white dark:text-[#0A0D14] font-bold'
-          : 'text-[#64748B] dark:text-[#94A3B8] hover:text-[#0F1115] dark:hover:text-white font-medium'
-          }`}
-      >
-        {activeTab === 'tools' && (
-          <motion.div
-            layoutId="activeBentoTabPill"
-            className="absolute inset-0 bg-[#0F1115] dark:bg-[#C6F432] rounded-xl shadow-sm dark:shadow-[0_2px_12px_rgba(198,244,50,0.35)]"
-            transition={{ type: "spring", stiffness: 450, damping: 32 }}
-          />
-        )}
-        <span className="relative z-10 flex items-center gap-1 sm:gap-1.5">
-          <M3ToolsIcon
-            className={`w-3.5 h-3.5 ${activeTab === 'tools'
-              ? 'text-white dark:text-[#0A0D14]'
-              : 'text-[#8B5CF6] dark:text-[#A78BFA]'
-              }`}
-            filled={activeTab === 'tools'}
-          />
-          <span className="font-display tracking-tight">Tools</span>
-        </span>
-      </button>
-    </div>
-  </div>
+            {/* Remote & Tools Tab */}
+            <button
+              onClick={() => handleTabChange('tools')}
+              className={`apple-press relative z-10 flex items-center justify-center gap-1 py-2 px-1 rounded-xl text-xs transition-colors shrink-0 ${activeTab === 'tools'
+                ? 'text-white dark:text-[#0A0D14] font-bold'
+                : 'text-[#64748B] dark:text-[#94A3B8] hover:text-[#0F1115] dark:hover:text-white font-medium'
+                }`}
+            >
+              {activeTab === 'tools' && (
+                <motion.div
+                  layoutId="activeBentoTabPill"
+                  className="absolute inset-0 bg-[#0F1115] dark:bg-[#C6F432] rounded-xl shadow-sm dark:shadow-[0_2px_10px_rgba(198,244,50,0.3)]"
+                  transition={{ type: "spring", bounce: 0.14, duration: 0.28 }}
+                />
+              )}
+              <span className="relative z-10 flex items-center gap-1">
+                <M3ToolsIcon
+                  className={`w-3.5 h-3.5 ${activeTab === 'tools'
+                    ? 'text-white dark:text-[#0A0D14]'
+                    : 'text-[#8B5CF6] dark:text-[#A78BFA]'
+                    }`}
+                  filled={activeTab === 'tools'}
+                />
+                <span className="font-display tracking-tight text-[11px] sm:text-xs">Tools</span>
+              </span>
+            </button>
+          </div>
+        </div>
 
-  {/* Tab Views with Emil Kowalski Snappy Timing */ }
-  <AnimatePresence mode="wait">
+        {/* Tab Views with Snappy Crossfade (No Layout Collapsing) */}
+        <AnimatePresence mode="popLayout" initial={false}>
     {activeTab === 'files' && (
       <motion.div
         key="files"
-        initial={{ opacity: 0, y: 3 }}
-        animate={{ opacity: 1, y: 0 }}
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
-        transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
+        transition={{ duration: 0.12, ease: "easeOut" }}
         className="space-y-6"
       >
         {/* 1. Full-Width Expansive Hero AirDrop Stage */}
@@ -821,10 +871,10 @@ export const App: React.FC = () => {
     {activeTab === 'clipboard' && (
       <motion.div
         key="clipboard"
-        initial={{ opacity: 0, y: 3 }}
-        animate={{ opacity: 1, y: 0 }}
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
-        transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
+        transition={{ duration: 0.12, ease: "easeOut" }}
       >
         <UniversalClipboard
           items={clipboardItems}
@@ -840,10 +890,10 @@ export const App: React.FC = () => {
     {activeTab === 'chat' && (
       <motion.div
         key="chat"
-        initial={{ opacity: 0, y: 3 }}
-        animate={{ opacity: 1, y: 0 }}
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
-        transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
+        transition={{ duration: 0.12, ease: "easeOut" }}
       >
         <PeerChat
           devices={cleanDevices}
@@ -863,10 +913,10 @@ export const App: React.FC = () => {
     {activeTab === 'tools' && (
       <motion.div
         key="tools"
-        initial={{ opacity: 0, y: 3 }}
-        animate={{ opacity: 1, y: 0 }}
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
-        transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
+        transition={{ duration: 0.12, ease: "easeOut" }}
       >
         <DeviceRemoteTools
           devices={cleanDevices}
@@ -929,6 +979,18 @@ export const App: React.FC = () => {
         isOpen={isRinging}
         ringSource={ringSource}
         onDismiss={dismissRing}
+      />
+
+      {/* Website Custom Alert Modal: Folder Upload Confirmation */}
+      <FolderBeamModal
+        isOpen={!!pendingFolderUpload}
+        folderName={pendingFolderUpload?.folderName || ''}
+        files={pendingFolderUpload?.files || []}
+        onConfirm={(selectedFiles) => {
+          setPendingFolderUpload(null);
+          executeUpload(selectedFiles);
+        }}
+        onClose={() => setPendingFolderUpload(null)}
       />
     </div>
   );
