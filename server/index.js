@@ -253,6 +253,8 @@ const apiLimiter = rateLimit({
   },
 });
 
+app.use('/api', apiLimiter);
+
 // Dedicated strict rate limiter for Office Room PIN verification to prevent brute-forcing
 const pinAuthLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -825,7 +827,7 @@ function getDirectoryStats(dirPath) {
 // REST API Endpoints
 
 // Server info & network discovery
-app.get('/api/info', (req, res) => {
+app.get('/api/info', apiLimiter, (req, res) => {
   const net = getNetworkIps();
   const isHost = isHostRequest(req);
   const isAuthed = isHost || isAuthorizedRequest(req);
@@ -859,7 +861,7 @@ app.get('/api/info', (req, res) => {
 });
 
 // Battery endpoint for macOS & Windows host & web clients
-app.get('/api/battery', async (req, res) => {
+app.get('/api/battery', apiLimiter, async (req, res) => {
   const battery = await getHostBattery();
   res.json({ battery });
 });
@@ -903,7 +905,7 @@ app.post('/api/office/configure', apiLimiter, requireOfficeAuth, (req, res) => {
 });
 
 // Upload endpoint (supports full recursive folder beaming up to 1000 files)
-app.post('/api/upload', requireOfficeAuth, upload.array('files', 1000), (req, res) => {
+app.post('/api/upload', apiLimiter, requireOfficeAuth, upload.array('files', 1000), (req, res) => {
   if (!req.files || req.files.length === 0) {
     return res.status(400).json({ error: 'No files uploaded' });
   }
@@ -936,7 +938,7 @@ app.post('/api/upload', requireOfficeAuth, upload.array('files', 1000), (req, re
 });
 
 // Resumable Chunked Upload for arbitrarily large files (1GB, 5GB, 10GB+)
-app.post('/api/upload-chunk', requireOfficeAuth, chunkUpload.single('chunk'), async (req, res) => {
+app.post('/api/upload-chunk', apiLimiter, requireOfficeAuth, chunkUpload.single('chunk'), async (req, res) => {
   const safeChunksDir = path.resolve(CHUNKS_TEMP_DIR);
   const chunkFileName = path.basename(req.file ? req.file.path : '');
   const safeChunkPath = path.resolve(safeChunksDir, chunkFileName);
@@ -967,17 +969,20 @@ app.post('/api/upload-chunk', requireOfficeAuth, chunkUpload.single('chunk'), as
     const tChunks = parseInt(totalChunks, 10);
 
     const ROOT = path.resolve(UPLOADS_DIR);
-    const resolvedFinalPath = path.resolve(ROOT, relativePath || filename);
+    const rawTarget = String(relativePath || filename);
+    const cleanRel = path.normalize(rawTarget).replace(/\\/g, '/').replace(/^(\.\.[\/\\])+/, '').replace(/^\/+/, '');
+    const resolvedFinalPath = path.resolve(ROOT, cleanRel);
+    const rel = path.relative(ROOT, resolvedFinalPath);
 
-    // Path traversal check (strict separator prefix so sibling dirs like
-    // "AirBridgeBackup" can never pass)
-    if (!resolvedFinalPath.startsWith(ROOT + path.sep)) {
+    // Path traversal check (strict relative & separator prefix)
+    if (!rel || rel.startsWith('..') || path.isAbsolute(rel) || !resolvedFinalPath.startsWith(ROOT + path.sep)) {
       cleanupChunk();
       return res.status(403).json({ error: 'Access denied: Path traversal detected' });
     }
 
     const targetDir = path.dirname(resolvedFinalPath);
-    if (targetDir !== ROOT && !targetDir.startsWith(ROOT + path.sep)) {
+    const dirRel = path.relative(ROOT, targetDir);
+    if (targetDir !== ROOT && (!dirRel || dirRel.startsWith('..') || path.isAbsolute(dirRel) || !targetDir.startsWith(ROOT + path.sep))) {
       cleanupChunk();
       return res.status(403).json({ error: 'Access denied: Invalid directory' });
     }
@@ -1085,7 +1090,7 @@ setInterval(() => {
   }
 }, 60000);
 
-app.post('/api/upload-parallel', requireOfficeAuth, memoryChunkUpload.single('chunk'), async (req, res) => {
+app.post('/api/upload-parallel', apiLimiter, requireOfficeAuth, memoryChunkUpload.single('chunk'), async (req, res) => {
   try {
     const {
       fileId,
@@ -1111,14 +1116,20 @@ app.post('/api/upload-parallel', requireOfficeAuth, memoryChunkUpload.single('ch
     let transfer = activeTransfers.get(safeFileId);
     if (!transfer) {
       const ROOT = path.resolve(UPLOADS_DIR);
-      let cleanRel = (relativePath || filename).replace(/\\/g, '/').replace(/^(\.\.[\/\\])+/, '').replace(/^\/+/, '');
+      const rawTarget = String(relativePath || filename);
+      const cleanRel = path.normalize(rawTarget).replace(/\\/g, '/').replace(/^(\.\.[\/\\])+/, '').replace(/^\/+/, '');
       const resolvedFinalPath = path.resolve(ROOT, cleanRel);
+      const rel = path.relative(ROOT, resolvedFinalPath);
 
-      if (!resolvedFinalPath.startsWith(ROOT + path.sep)) {
+      if (!rel || rel.startsWith('..') || path.isAbsolute(rel) || !resolvedFinalPath.startsWith(ROOT + path.sep)) {
         return res.status(403).json({ error: 'Access denied: Path traversal detected' });
       }
 
       const targetDir = path.dirname(resolvedFinalPath);
+      const dirRel = path.relative(ROOT, targetDir);
+      if (targetDir !== ROOT && (!dirRel || dirRel.startsWith('..') || path.isAbsolute(dirRel) || !targetDir.startsWith(ROOT + path.sep))) {
+        return res.status(403).json({ error: 'Access denied: Invalid directory' });
+      }
       if (!fs.existsSync(targetDir)) {
         fs.mkdirSync(targetDir, { recursive: true });
       }
@@ -1223,13 +1234,15 @@ app.post('/api/upload-parallel', requireOfficeAuth, memoryChunkUpload.single('ch
 // Ranged File Download – supports HTTP Range requests for parallel download
 // Frontend can request multiple byte ranges simultaneously for faster transfers
 // =====================================================================
-app.get(/^\/api\/files-ranged\/(.*)/, requireOfficeAuth, (req, res) => {
+app.get(/^\/api\/files-ranged\/(.*)/, apiLimiter, requireOfficeAuth, (req, res) => {
   const reqPath = decodeURIComponent(req.params[0] || '');
   const ROOT = path.resolve(UPLOADS_DIR);
-  const filePath = path.resolve(ROOT, reqPath);
+  const cleanPath = path.normalize(reqPath).replace(/\\/g, '/').replace(/^(\.\.[\/\\])+/, '').replace(/^\/+/, '');
+  const filePath = path.resolve(ROOT, cleanPath);
+  const rel = path.relative(ROOT, filePath);
 
-  // Path traversal check (strict separator prefix)
-  if (!filePath.startsWith(ROOT + path.sep)) {
+  // Path traversal check (strict relative & separator prefix)
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel) || !filePath.startsWith(ROOT + path.sep)) {
     return res.status(403).json({ error: 'Forbidden' });
   }
 
@@ -1286,7 +1299,7 @@ app.get(/^\/api\/files-ranged\/(.*)/, requireOfficeAuth, (req, res) => {
 });
 
 // Instant Camera Snap upload via multipart form-data (multer diskStorage)
-app.post('/api/upload-snap', requireOfficeAuth, upload.single('file'), (req, res) => {
+app.post('/api/upload-snap', apiLimiter, requireOfficeAuth, upload.single('file'), (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'No image uploaded' });
@@ -1327,7 +1340,7 @@ app.post('/api/upload-snap', requireOfficeAuth, upload.single('file'), (req, res
 
 // List files and folders in transfer directory (with 2-second high-throughput caching)
 
-app.get('/api/files', requireOfficeAuth, (req, res) => {
+app.get('/api/files', apiLimiter, requireOfficeAuth, (req, res) => {
   const now = Date.now();
   if (cachedFilesList && (now - lastFilesListTime < 2000)) {
     return res.json({ files: cachedFilesList });
@@ -1377,13 +1390,15 @@ app.get('/api/files', requireOfficeAuth, (req, res) => {
 });
 
 // Download single file or file nested inside a folder with secure headers
-app.get(/^\/api\/files\/(.*)/, requireOfficeAuth, (req, res) => {
+app.get(/^\/api\/files\/(.*)/, apiLimiter, requireOfficeAuth, (req, res) => {
   const reqPath = decodeURIComponent(req.params[0] || '');
   const ROOT = path.resolve(UPLOADS_DIR);
-  const filePath = path.resolve(ROOT, reqPath);
+  const cleanPath = path.normalize(reqPath).replace(/\\/g, '/').replace(/^(\.\.[\/\\])+/, '').replace(/^\/+/, '');
+  const filePath = path.resolve(ROOT, cleanPath);
+  const rel = path.relative(ROOT, filePath);
 
-  // Path traversal check (strict separator prefix)
-  if (!filePath.startsWith(ROOT + path.sep)) {
+  // Path traversal check (strict relative & separator prefix)
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel) || !filePath.startsWith(ROOT + path.sep)) {
     return res.status(403).json({ error: 'Forbidden' });
   }
 
@@ -1435,13 +1450,15 @@ app.get(/^\/api\/files\/(.*)/, requireOfficeAuth, (req, res) => {
 });
 
 // Stream or view raw file
-app.get(/^\/api\/files-raw\/(.*)/, requireOfficeAuth, (req, res) => {
+app.get(/^\/api\/files-raw\/(.*)/, apiLimiter, requireOfficeAuth, (req, res) => {
   const reqPath = decodeURIComponent(req.params[0] || '');
   const ROOT = path.resolve(UPLOADS_DIR);
-  const filePath = path.resolve(ROOT, reqPath);
+  const cleanPath = path.normalize(reqPath).replace(/\\/g, '/').replace(/^(\.\.[\/\\])+/, '').replace(/^\/+/, '');
+  const filePath = path.resolve(ROOT, cleanPath);
+  const rel = path.relative(ROOT, filePath);
 
-  // Path traversal check (strict separator prefix)
-  if (!filePath.startsWith(ROOT + path.sep)) {
+  // Path traversal check (strict relative & separator prefix)
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel) || !filePath.startsWith(ROOT + path.sep)) {
     return res.status(403).json({ error: 'Forbidden' });
   }
 
@@ -1453,13 +1470,25 @@ app.get(/^\/api\/files-raw\/(.*)/, requireOfficeAuth, (req, res) => {
 });
 
 // Download entire folder as a ZIP archive on demand (instant native C zip streaming at line rate)
-app.get(/^\/api\/download-folder\/(.*)/, requireOfficeAuth, (req, res) => {
+app.get(/^\/api\/download-folder\/(.*)/, apiLimiter, requireOfficeAuth, (req, res) => {
   const folderRelPath = decodeURIComponent(req.params[0] || '');
   const ROOT = path.resolve(UPLOADS_DIR);
-  const folderPath = path.resolve(ROOT, folderRelPath);
+  const cleanRel = path.normalize(folderRelPath).replace(/\\/g, '/').replace(/^(\.\.[\/\\])+/, '').replace(/^\/+/, '');
+  const folderPath = path.resolve(ROOT, cleanRel);
+  const rel = path.relative(ROOT, folderPath);
 
-  if ((folderPath !== ROOT && !folderPath.startsWith(ROOT + path.sep)) || !fs.existsSync(folderPath)) {
+  // Path traversal check (strict relative & separator prefix)
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel) || !folderPath.startsWith(ROOT + path.sep)) {
+    return res.status(403).json({ error: 'Access denied: Invalid folder path' });
+  }
+
+  if (!fs.existsSync(folderPath)) {
     return res.status(404).json({ error: 'Folder not found' });
+  }
+
+  const stat = fs.statSync(folderPath);
+  if (!stat.isDirectory()) {
+    return res.status(400).json({ error: 'Not a directory' });
   }
 
   const folderName = path.basename(folderPath);
@@ -1472,6 +1501,10 @@ app.get(/^\/api\/download-folder\/(.*)/, requireOfficeAuth, (req, res) => {
 
   if (zipBinary) {
     const parentDir = path.dirname(folderPath);
+    const parentRel = path.relative(ROOT, parentDir);
+    if (parentDir !== ROOT && (!parentRel || parentRel.startsWith('..') || path.isAbsolute(parentRel) || !parentDir.startsWith(ROOT + path.sep))) {
+      return res.status(403).json({ error: 'Access denied: Invalid parent path' });
+    }
     const targetDirName = path.basename(folderPath);
 
     const zipProcess = spawn(zipBinary, ['-0', '-q', '-r', '-', targetDirName], {
@@ -1505,7 +1538,7 @@ app.get(/^\/api\/download-folder\/(.*)/, requireOfficeAuth, (req, res) => {
 });
 
 // Download all files as a ZIP archive (instant native C zip streaming)
-app.get('/api/download-zip', requireOfficeAuth, (req, res) => {
+app.get('/api/download-zip', apiLimiter, requireOfficeAuth, (req, res) => {
   res.setHeader('Content-Type', 'application/zip');
   res.setHeader('Content-Disposition', 'attachment; filename="AirBridge_Files.zip"');
   res.setHeader('Cache-Control', 'private, max-age=86400, no-transform');
@@ -1551,10 +1584,12 @@ function deleteFileOrDirectory(targetName) {
   }
 
   const ROOT = path.resolve(UPLOADS_DIR);
-  const targetPath = path.resolve(ROOT, targetName);
+  const cleanTarget = path.normalize(targetName).replace(/\\/g, '/').replace(/^(\.\.[\/\\])+/, '').replace(/^\/+/, '');
+  const targetPath = path.resolve(ROOT, cleanTarget);
+  const rel = path.relative(ROOT, targetPath);
 
   // Security: prevent path traversal outside UPLOADS_DIR
-  if (targetPath === ROOT || !targetPath.startsWith(ROOT + path.sep)) {
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel) || targetPath === ROOT || !targetPath.startsWith(ROOT + path.sep)) {
     throw new Error('Access denied: cannot delete outside root uploads folder');
   }
 
@@ -1610,10 +1645,11 @@ app.post('/api/files/delete', apiLimiter, handleDeleteFileRequest);
 const handleRevealInFileManager = (req, res) => {
   const ROOT = path.resolve(UPLOADS_DIR);
   const rawFilename = (req.body && typeof req.body.filename === 'string') ? req.body.filename : '';
-  const cleanFilename = path.normalize(rawFilename).replace(/^(\.\.[\/\\])+/, '');
+  const cleanFilename = path.normalize(rawFilename).replace(/\\/g, '/').replace(/^(\.\.[\/\\])+/, '').replace(/^\/+/, '');
   const targetPath = cleanFilename ? path.resolve(ROOT, cleanFilename) : ROOT;
+  const rel = path.relative(ROOT, targetPath);
 
-  if (targetPath !== ROOT && !targetPath.startsWith(ROOT + path.sep)) {
+  if (targetPath !== ROOT && (!rel || rel.startsWith('..') || path.isAbsolute(rel) || !targetPath.startsWith(ROOT + path.sep))) {
     return res.status(403).json({ error: 'Access denied: Invalid path' });
   }
 
@@ -1689,7 +1725,7 @@ app.post('/api/open-url', apiLimiter, requireOfficeAuth, (req, res) => {
 });
 
 // Get chat history
-app.get('/api/chat', requireOfficeAuth, (req, res) => {
+app.get('/api/chat', apiLimiter, requireOfficeAuth, (req, res) => {
   res.json({ messages: appState.chatHistory });
 });
 
@@ -1702,7 +1738,7 @@ app.post('/api/chat/clear', apiLimiter, requireOfficeAuth, (req, res) => {
 });
 
 // Get clipboard history
-app.get('/api/clipboard', requireOfficeAuth, (req, res) => {
+app.get('/api/clipboard', apiLimiter, requireOfficeAuth, (req, res) => {
   res.json({ items: appState.clipboardHistory });
 });
 
