@@ -345,12 +345,6 @@ const chunkUpload = multer({
   limits: { fileSize: 64 * 1024 * 1024 }, // 64MB max per individual chunk
 });
 
-// Memory storage for zero-copy direct-positioned writes
-const memoryChunkUpload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 64 * 1024 * 1024 },
-});
-
 // Create HTTP and WebSocket server with zero timeout for giant transfers
 const server = http.createServer(app);
 server.requestTimeout = 0; // Disable request timeout
@@ -987,9 +981,7 @@ app.post('/api/upload-chunk', apiLimiter, requireOfficeAuth, chunkUpload.single(
       return res.status(403).json({ error: 'Access denied: Invalid directory' });
     }
 
-    if (!fs.existsSync(targetDir)) {
-      fs.mkdirSync(targetDir, { recursive: true });
-    }
+    fs.mkdirSync(targetDir, { recursive: true });
 
     const baseName = path.basename(resolvedFinalPath);
     const safeFileId = String(fileId).replace(/[^a-zA-Z0-9_-]/g, '');
@@ -1090,7 +1082,13 @@ setInterval(() => {
   }
 }, 60000);
 
-app.post('/api/upload-parallel', apiLimiter, requireOfficeAuth, memoryChunkUpload.single('chunk'), async (req, res) => {
+app.post('/api/upload-parallel', apiLimiter, requireOfficeAuth, chunkUpload.single('chunk'), async (req, res) => {
+  const cleanupTempChunk = () => {
+    if (req.file && req.file.path && fs.existsSync(req.file.path)) {
+      try { fs.unlinkSync(req.file.path); } catch (e) {}
+    }
+  };
+
   try {
     const {
       fileId,
@@ -1104,6 +1102,7 @@ app.post('/api/upload-parallel', apiLimiter, requireOfficeAuth, memoryChunkUploa
     } = req.body;
 
     if (!req.file || !fileId || chunkIndex === undefined || totalChunks === undefined || !filename) {
+      cleanupTempChunk();
       return res.status(400).json({ error: 'Missing parallel chunk upload parameters' });
     }
 
@@ -1122,23 +1121,29 @@ app.post('/api/upload-parallel', apiLimiter, requireOfficeAuth, memoryChunkUploa
       const rel = path.relative(ROOT, resolvedFinalPath);
 
       if (!rel || rel.startsWith('..') || path.isAbsolute(rel) || !resolvedFinalPath.startsWith(ROOT + path.sep)) {
+        cleanupTempChunk();
         return res.status(403).json({ error: 'Access denied: Path traversal detected' });
       }
 
       const targetDir = path.dirname(resolvedFinalPath);
       const dirRel = path.relative(ROOT, targetDir);
       if (targetDir !== ROOT && (!dirRel || dirRel.startsWith('..') || path.isAbsolute(dirRel) || !targetDir.startsWith(ROOT + path.sep))) {
+        cleanupTempChunk();
         return res.status(403).json({ error: 'Access denied: Invalid directory' });
       }
-      if (!fs.existsSync(targetDir)) {
-        fs.mkdirSync(targetDir, { recursive: true });
-      }
+
+      fs.mkdirSync(targetDir, { recursive: true });
 
       const baseName = path.basename(resolvedFinalPath);
       const partPath = path.resolve(targetDir, `.${baseName}.${safeFileId}.part`);
-      
-      // Synchronous open guarantees atomic single file descriptor allocation across concurrent chunks
-      const fd = fs.openSync(partPath, fs.existsSync(partPath) ? 'r+' : 'w+');
+      const partRel = path.relative(ROOT, partPath);
+      if (!partRel || partRel.startsWith('..') || path.isAbsolute(partRel) || !partPath.startsWith(ROOT + path.sep)) {
+        cleanupTempChunk();
+        return res.status(403).json({ error: 'Access denied: Invalid temp path' });
+      }
+
+      // Synchronous open with atomic O_RDWR | O_CREAT guarantees single file descriptor allocation with no TOCTOU
+      const fd = fs.openSync(partPath, fs.constants.O_RDWR | fs.constants.O_CREAT);
 
       transfer = {
         fd,
@@ -1157,13 +1162,15 @@ app.post('/api/upload-parallel', apiLimiter, requireOfficeAuth, memoryChunkUploa
       activeTransfers.set(safeFileId, transfer);
     }
 
-    // Direct atomic positioned write into .part file via fs.write with integer fd
+    // Read chunk from disk-backed temporary file and write into .part file at specific offset
+    const chunkBuf = fs.readFileSync(req.file.path);
     await new Promise((resolve, reject) => {
-      fs.write(transfer.fd, req.file.buffer, 0, req.file.buffer.length, position, (err) => {
+      fs.write(transfer.fd, chunkBuf, 0, chunkBuf.length, position, (err) => {
         if (err) return reject(err);
         resolve();
       });
     });
+    cleanupTempChunk();
 
     transfer.received.add(cIndex);
     transfer.lastActivity = Date.now();
@@ -1225,6 +1232,7 @@ app.post('/api/upload-parallel', apiLimiter, requireOfficeAuth, memoryChunkUploa
       totalChunks: tChunks,
     });
   } catch (err) {
+    cleanupTempChunk();
     console.error('Error in /api/upload-parallel:', err);
     res.status(500).json({ error: err.message });
   }
@@ -1641,24 +1649,7 @@ app.delete(/^\/api\/files\/(.*)/, apiLimiter, handleDeleteFileRequest);
 app.delete('/api/files/{*filename}', apiLimiter, handleDeleteFileRequest);
 app.post('/api/files/delete', apiLimiter, handleDeleteFileRequest);
 
-// Reveal file or directory in Windows File Explorer, macOS Finder, or Linux File Manager
-const handleRevealInFileManager = (req, res) => {
-  const ROOT = path.resolve(UPLOADS_DIR);
-  const rawFilename = (req.body && typeof req.body.filename === 'string') ? req.body.filename : '';
-  const cleanFilename = path.normalize(rawFilename).replace(/\\/g, '/').replace(/^(\.\.[\/\\])+/, '').replace(/^\/+/, '');
-  const targetPath = cleanFilename ? path.resolve(ROOT, cleanFilename) : ROOT;
-  const rel = path.relative(ROOT, targetPath);
-
-  if (targetPath !== ROOT && (!rel || rel.startsWith('..') || path.isAbsolute(rel) || !targetPath.startsWith(ROOT + path.sep))) {
-    return res.status(403).json({ error: 'Access denied: Invalid path' });
-  }
-
-  if (!fs.existsSync(targetPath)) {
-    return res.status(404).json({ error: 'Target path does not exist' });
-  }
-
-  const isDirectory = fs.statSync(targetPath).isDirectory();
-
+function openPathInSystemFileManager(targetPath, isDirectory, res) {
   if (isWindows) {
     const explorerArgs = isDirectory ? [targetPath] : [`/select,${targetPath}`];
     execFile('explorer.exe', explorerArgs, (err) => {
@@ -1684,6 +1675,36 @@ const handleRevealInFileManager = (req, res) => {
       res.json({ success: true, opened: path.basename(targetPath), platform: 'linux' });
     });
   }
+}
+
+// Reveal file or directory in Windows File Explorer, macOS Finder, or Linux File Manager
+const handleRevealInFileManager = (req, res) => {
+  const ROOT = path.resolve(UPLOADS_DIR);
+  const rawFilename = (req.body && typeof req.body.filename === 'string') ? req.body.filename.trim() : '';
+
+  if (!rawFilename) {
+    return openPathInSystemFileManager(ROOT, true, res);
+  }
+
+  // Strict path traversal containment
+  if (rawFilename.includes('..') || path.isAbsolute(rawFilename)) {
+    return res.status(403).json({ error: 'Access denied: Invalid path' });
+  }
+
+  const cleanFilename = path.normalize(rawFilename).replace(/\\/g, '/').replace(/^\/+/, '');
+  const targetPath = path.resolve(ROOT, cleanFilename);
+  const rel = path.relative(ROOT, targetPath);
+
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel) || !targetPath.startsWith(ROOT + path.sep)) {
+    return res.status(403).json({ error: 'Access denied: Invalid path' });
+  }
+
+  if (!fs.existsSync(targetPath)) {
+    return res.status(404).json({ error: 'Target path does not exist' });
+  }
+
+  const isDirectory = fs.statSync(targetPath).isDirectory();
+  return openPathInSystemFileManager(targetPath, isDirectory, res);
 };
 
 app.post('/api/open-in-finder', apiLimiter, requireOfficeAuth, handleRevealInFileManager);
