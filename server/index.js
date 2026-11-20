@@ -345,6 +345,12 @@ const chunkUpload = multer({
   limits: { fileSize: 64 * 1024 * 1024 }, // 64MB max per individual chunk
 });
 
+// Memory storage for zero-copy direct-positioned writes (parallel upload engine)
+const memoryChunkUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 64 * 1024 * 1024 },
+});
+
 // Create HTTP and WebSocket server with zero timeout for giant transfers
 const server = http.createServer(app);
 server.requestTimeout = 0; // Disable request timeout
@@ -1082,18 +1088,7 @@ setInterval(() => {
   }
 }, 60000);
 
-app.post('/api/upload-parallel', apiLimiter, requireOfficeAuth, chunkUpload.single('chunk'), async (req, res) => {
-  const safeChunksDir = path.resolve(CHUNKS_TEMP_DIR);
-  const chunkFileName = path.basename(req.file ? req.file.path : '');
-  const safeChunkPath = path.resolve(safeChunksDir, chunkFileName);
-  const isChunkValid = chunkFileName.length > 0 && safeChunkPath.startsWith(safeChunksDir + path.sep);
-
-  const cleanupTempChunk = () => {
-    if (isChunkValid && fs.existsSync(safeChunkPath)) {
-      try { fs.unlinkSync(safeChunkPath); } catch (e) {}
-    }
-  };
-
+app.post('/api/upload-parallel', apiLimiter, requireOfficeAuth, memoryChunkUpload.single('chunk'), async (req, res) => {
   try {
     const {
       fileId,
@@ -1106,9 +1101,8 @@ app.post('/api/upload-parallel', apiLimiter, requireOfficeAuth, chunkUpload.sing
       fileSize,
     } = req.body;
 
-    if (!req.file || !fileId || chunkIndex === undefined || totalChunks === undefined || !filename || !isChunkValid) {
-      cleanupTempChunk();
-      return res.status(400).json({ error: 'Missing or invalid parallel chunk upload parameters' });
+    if (!req.file || !fileId || chunkIndex === undefined || totalChunks === undefined || !filename) {
+      return res.status(400).json({ error: 'Missing parallel chunk upload parameters' });
     }
 
     const cIndex = parseInt(chunkIndex, 10);
@@ -1126,14 +1120,12 @@ app.post('/api/upload-parallel', apiLimiter, requireOfficeAuth, chunkUpload.sing
       const rel = path.relative(ROOT, resolvedFinalPath);
 
       if (!rel || rel.startsWith('..') || path.isAbsolute(rel) || !resolvedFinalPath.startsWith(ROOT + path.sep)) {
-        cleanupTempChunk();
         return res.status(403).json({ error: 'Access denied: Path traversal detected' });
       }
 
       const targetDir = path.dirname(resolvedFinalPath);
       const dirRel = path.relative(ROOT, targetDir);
       if (targetDir !== ROOT && (!dirRel || dirRel.startsWith('..') || path.isAbsolute(dirRel) || !targetDir.startsWith(ROOT + path.sep))) {
-        cleanupTempChunk();
         return res.status(403).json({ error: 'Access denied: Invalid directory' });
       }
 
@@ -1143,7 +1135,6 @@ app.post('/api/upload-parallel', apiLimiter, requireOfficeAuth, chunkUpload.sing
       const partPath = path.resolve(targetDir, `.${baseName}.${safeFileId}.part`);
       const partRel = path.relative(ROOT, partPath);
       if (!partRel || partRel.startsWith('..') || path.isAbsolute(partRel) || !partPath.startsWith(ROOT + path.sep)) {
-        cleanupTempChunk();
         return res.status(403).json({ error: 'Access denied: Invalid temp path' });
       }
 
@@ -1167,15 +1158,14 @@ app.post('/api/upload-parallel', apiLimiter, requireOfficeAuth, chunkUpload.sing
       activeTransfers.set(safeFileId, transfer);
     }
 
-    // Read chunk from disk-backed temporary file and write into .part file at specific offset
-    const chunkBuf = fs.readFileSync(safeChunkPath);
+    // Validated in-memory chunk data written to .part file at specific byte offset
+    const chunkData = Buffer.from(req.file.buffer);
     await new Promise((resolve, reject) => {
-      fs.write(transfer.fd, chunkBuf, 0, chunkBuf.length, position, (err) => {
+      fs.write(transfer.fd, chunkData, 0, chunkData.length, position, (err) => {
         if (err) return reject(err);
         resolve();
       });
     });
-    cleanupTempChunk();
 
     transfer.received.add(cIndex);
     transfer.lastActivity = Date.now();
@@ -1237,7 +1227,6 @@ app.post('/api/upload-parallel', apiLimiter, requireOfficeAuth, chunkUpload.sing
       totalChunks: tChunks,
     });
   } catch (err) {
-    cleanupTempChunk();
     console.error('Error in /api/upload-parallel:', err);
     res.status(500).json({ error: err.message });
   }
