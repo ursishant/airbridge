@@ -8,7 +8,7 @@
 
 *Zero client app installation • Direct gigabit LAN file transfer • Office Wi-Fi PIN security • Live clipboard sync • Universal multi-device mesh*
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Android%20%7C%20iOS%20%7C%20Linux-black.svg)](#)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.0-3178C6.svg?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![React](https://img.shields.io/badge/React-19-61DAFB.svg?logo=react&logoColor=black)](https://react.dev/)
@@ -263,4 +263,4 @@ Contributions and feedback are welcome:
 
 ## License
 
-Distributed under the **MIT License**. See [LICENSE](LICENSE) for details.
+Distributed under the **Apache-2.0 License**. See [LICENSE](LICENSE) for details.
