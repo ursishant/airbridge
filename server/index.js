@@ -479,6 +479,28 @@ wss.on('connection', (ws, req) => {
   if (!isAuthenticated && queryPin && queryPin === state.officeSecurity?.pin) {
     isAuthenticated = true;
   }
+
+  // If host requires explicit device approval:
+  if (isAuthenticated && !isHostClient && state.officeSecurity?.requireApproval) {
+    const approvedList = Array.isArray(state.approvedDevices) ? state.approvedDevices : [];
+    if (!approvedList.includes(clientId)) {
+      isAuthenticated = false;
+      // Register pending approval request
+      if (!Array.isArray(state.pendingApprovalRequests)) state.pendingApprovalRequests = [];
+      if (!state.pendingApprovalRequests.find(r => r.id === clientId)) {
+        state.pendingApprovalRequests.push({
+          id: clientId,
+          name: clientName,
+          ip,
+          requestedAt: Date.now(),
+        });
+        broadcast({
+          type: 'device_approval_requested',
+          device: { id: clientId, name: clientName, ip, requestedAt: Date.now() },
+        });
+      }
+    }
+  }
   ws.isAuthenticated = isAuthenticated;
   ws.isHost = isHostClient;
 
@@ -757,6 +779,7 @@ app.use('/api', requireOfficeAuth, createFilesRouter({
   isMac,
   isWindows,
   isLinux,
+  stateStore,
 }));
 
 // Serve frontend in production (static build)

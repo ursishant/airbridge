@@ -30,8 +30,12 @@ export interface ServerInfo {
   officeSecurity?: {
     enabled: boolean;
     requiresAuth: boolean;
+    requireApproval?: boolean;
+    isPendingApproval?: boolean;
     pin?: string;
   };
+  approvedDevices?: string[];
+  pendingApprovalRequests?: Array<{ id: string; name: string; ip: string; requestedAt: number }>;
 }
 
 export interface ClipboardItem {
@@ -448,7 +452,67 @@ export function useWebSocket() {
             }
 
             case 'toast': {
-              showToast(data.message);
+              if (data.message) {
+                showToast(data.message);
+              }
+              break;
+            }
+
+            case 'device_approval_requested': {
+              if (data.device) {
+                setServerInfo((prev) => {
+                  if (!prev) return null;
+                  const currentPending = prev.pendingApprovalRequests || [];
+                  if (currentPending.some(r => r.id === data.device.id)) return prev;
+                  return {
+                    ...prev,
+                    pendingApprovalRequests: [...currentPending, data.device],
+                  };
+                });
+                showToast(`Access requested by ${data.device.name}`);
+              }
+              break;
+            }
+
+            case 'device_approval_resolved': {
+              if (data.deviceId) {
+                setServerInfo((prev) => {
+                  if (!prev) return null;
+                  return {
+                    ...prev,
+                    pendingApprovalRequests: (prev.pendingApprovalRequests || []).filter(r => r.id !== data.deviceId),
+                    approvedDevices: data.approved
+                      ? [...(prev.approvedDevices || []).filter(id => id !== data.deviceId), data.deviceId]
+                      : (prev.approvedDevices || []).filter(id => id !== data.deviceId),
+                  };
+                });
+                if (data.deviceId === myDeviceId) {
+                  if (data.approved) {
+                    setIsOfficeLocked(false);
+                    showToast('Host Approved Access! Workspace Unlocked');
+                  } else {
+                    setIsOfficeLocked(true);
+                    showToast('Host Denied Access to this Workspace');
+                  }
+                }
+              }
+              break;
+            }
+
+            case 'device_revoked': {
+              if (data.deviceId) {
+                setServerInfo((prev) => {
+                  if (!prev) return null;
+                  return {
+                    ...prev,
+                    approvedDevices: (prev.approvedDevices || []).filter(id => id !== data.deviceId),
+                  };
+                });
+                if (data.deviceId === myDeviceId) {
+                  setIsOfficeLocked(true);
+                  showToast('Access revoked by host');
+                }
+              }
               break;
             }
 
@@ -583,8 +647,8 @@ export function useWebSocket() {
     }
   }, [connect, showToast]);
 
-  // Office Security Configuration (Enable/Disable/Change PIN)
-  const configureOfficeSecurity = useCallback(async (enabled: boolean, newPin?: string): Promise<boolean> => {
+  // Office Security Configuration (Enable/Disable/Change PIN & Toggle Device Approval)
+  const configureOfficeSecurity = useCallback(async (enabled: boolean, newPin?: string, requireApproval?: boolean): Promise<boolean> => {
     try {
       const pinToSend = newPin || officePinRef.current;
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -594,25 +658,53 @@ export function useWebSocket() {
       const res = await fetch('/api/office/configure', {
         method: 'POST',
         headers,
-        body: JSON.stringify({ enabled, pin: pinToSend }),
+        body: JSON.stringify({ enabled, pin: pinToSend, requireApproval }),
       });
       if (res.ok) {
         const data = await res.json();
-        setOfficeSecurityEnabled(enabled);
-        if (data.officeSecurity?.pin) {
+        setOfficeSecurityEnabled(data.officeSecurity.enabled);
+        if (data.officeSecurity.pin) {
           setOfficePin(data.officeSecurity.pin);
           officePinRef.current = data.officeSecurity.pin;
           try {
             localStorage.setItem('airbridge_office_pin', data.officeSecurity.pin);
           } catch (e) {}
         }
-        showToast(enabled ? `Office Protection Active (PIN: ${data.officeSecurity?.pin})` : 'Office Protection Disabled');
+        showToast(enabled ? 'Office Security & Space Configured' : 'Office Security Disabled');
         return true;
       }
-      showToast('Failed to update office security');
       return false;
     } catch (e) {
-      showToast('Failed to update office security');
+      return false;
+    }
+  }, [showToast]);
+
+  // Host Action: Approve or Deny Colleague Device
+  const handleApproveDevice = useCallback(async (deviceId: string, approved: boolean): Promise<boolean> => {
+    try {
+      const res = await fetch('/api/office/approve-device', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ deviceId, approved }),
+      });
+      if (res.ok) {
+        setServerInfo((prev) => {
+          if (!prev) return null;
+          const pending = (prev.pendingApprovalRequests || []).filter(r => r.id !== deviceId);
+          const approvedList = approved
+            ? [...(prev.approvedDevices || []), deviceId]
+            : (prev.approvedDevices || []).filter(id => id !== deviceId);
+          return {
+            ...prev,
+            pendingApprovalRequests: pending,
+            approvedDevices: approvedList,
+          };
+        });
+        showToast(approved ? 'Device Approved for Private Sharing' : 'Device Access Denied');
+        return true;
+      }
+      return false;
+    } catch (_) {
       return false;
     }
   }, [showToast]);
@@ -767,6 +859,7 @@ export function useWebSocket() {
     sendChatMessage,
     clearChat,
     showToast,
+    handleApproveDevice,
   };
 }
 

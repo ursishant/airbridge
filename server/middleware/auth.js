@@ -7,7 +7,7 @@ const BOOT_HOST_SECRET = crypto.randomBytes(32).toString('hex');
 // Per-boot secret for signing session cookies / bearer tokens
 const SESSION_SECRET = crypto.randomBytes(32).toString('hex');
 
-// In-memory set or map of valid issued session tokens: token -> { issuedAt, ip }
+// In-memory set or map of valid issued session tokens: token -> { issuedAt, ip, deviceId }
 const validSessions = new Map();
 
 // Progressive lockout map for PIN attempts: ip -> { failedAttempts: number, lockedUntil: number }
@@ -38,10 +38,6 @@ function isLoopbackAddress(ip) {
 
 /**
  * Validates whether the request originated from the local host machine.
- * CRITICAL FIX:
- * - NEVER trusts req.hostname === 'localhost' or '127.0.0.1'
- * - ONLY trusts normalized loopback socket remote address (127.0.0.1, ::1)
- * - Optionally checks x-airbridge-host-token === BOOT_HOST_SECRET for privileged host endpoints
  */
 function isHostRequest(req, requireToken = false) {
   const remoteIp = getNormalizedRemoteAddress(req);
@@ -76,9 +72,7 @@ function getHostAddresses() {
 }
 
 /**
- * Strict CORS origin validator:
- * Allows requests with no origin (e.g. mobile apps, curl, native browser navigation, same-origin)
- * If Origin header is present, origin must be http or https AND host must match server's bound IPs/hostname.
+ * Strict CORS origin validator
  */
 function createCorsOriginValidator(serverPort) {
   return function validateOrigin(origin, callback) {
@@ -157,10 +151,11 @@ function verifySessionToken(token) {
 /**
  * Issues a session token (valid for 24 hours)
  */
-function issueSession(ip) {
+function issueSession(ip, deviceId = null) {
   const payload = {
     sub: 'office_user',
     ip,
+    deviceId: deviceId || null,
     iat: Date.now(),
     exp: Date.now() + 24 * 60 * 60 * 1000,
   };
@@ -178,7 +173,6 @@ function recordFailedPinAttempt(ip) {
   current.failedAttempts += 1;
 
   if (current.failedAttempts >= 5) {
-    // 5 attempts = 15 min lockout
     current.lockedUntil = now + 15 * 60 * 1000;
   }
   pinLockouts.set(ip, current);
@@ -203,7 +197,6 @@ function getPinLockoutInfo(ip) {
     const waitSeconds = Math.ceil((record.lockedUntil - now) / 1000);
     return { locked: true, waitSeconds, remainingAttempts: 0 };
   }
-  // Lockout expired
   if (record.lockedUntil && record.lockedUntil <= now) {
     pinLockouts.delete(ip);
     return { locked: false, remainingAttempts: 5 };
@@ -212,41 +205,98 @@ function getPinLockoutInfo(ip) {
 }
 
 /**
- * Office security request authorization validator
+ * Extracts requesting client device ID from headers or session
+ */
+function getClientDeviceId(req) {
+  let devId = req.headers['x-airbridge-device-id'] || req.query.deviceId || (req.body && req.body.deviceId);
+  if (devId) return String(devId).trim();
+
+  const cookies = parseCookies(req.headers.cookie);
+  const sessionCookie = cookies['airbridge_session'];
+  if (sessionCookie) {
+    const session = verifySessionToken(sessionCookie);
+    if (session && session.deviceId) return session.deviceId;
+  }
+
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    const session = verifySessionToken(authHeader.slice(7).trim());
+    if (session && session.deviceId) return session.deviceId;
+  }
+  return null;
+}
+
+/**
+ * Office security request authorization validator:
+ * 1. Host machine (loopback) is ALWAYS authorized.
+ * 2. If office security is disabled, authorized.
+ * 3. If office security is enabled:
+ *    - Must pass PIN or valid session cookie/token.
+ *    - AND if `requireApproval` is enabled: non-host deviceId must be in `state.approvedDevices`.
  */
 function isAuthorizedRequest(req, state) {
+  // If simulated peer flag is set (for testing), do not bypass as host
+  const isSimulatedPeer = Boolean(req.headers && req.headers['x-airbridge-simulated-peer']);
+  const isHost = isHostRequest(req) && !isSimulatedPeer;
+
+  // Loopback host machine is always authorized
+  if (isHost) {
+    return true;
+  }
+
   if (!state.officeSecurity || !state.officeSecurity.enabled) {
     return true;
   }
 
-  // The local host machine loopback is always authorized
-  if (isHostRequest(req)) {
-    return true;
-  }
+  let isPinAuthed = false;
+  let sessionDeviceId = null;
 
   // Check signed session cookie
   const cookies = parseCookies(req.headers.cookie);
   const sessionCookie = cookies['airbridge_session'];
-  if (sessionCookie && verifySessionToken(sessionCookie)) {
-    return true;
-  }
-
-  // Check Bearer authorization header
-  const authHeader = req.headers.authorization;
-  if (authHeader && authHeader.startsWith('Bearer ')) {
-    const bearer = authHeader.slice(7).trim();
-    if (verifySessionToken(bearer)) {
-      return true;
+  if (sessionCookie) {
+    const session = verifySessionToken(sessionCookie);
+    if (session) {
+      isPinAuthed = true;
+      sessionDeviceId = session.deviceId;
     }
   }
 
-  // Remote devices supplying valid PIN in header, query, or body (for legacy compatibility)
-  const clientPin = (req.headers['x-airbridge-pin'] || req.query.pin || (req.body && req.body.pin) || '').toString().trim();
-  if (state.officeSecurity.pin && clientPin === state.officeSecurity.pin) {
-    return true;
+  // Check Bearer authorization header
+  if (!isPinAuthed) {
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      const session = verifySessionToken(authHeader.slice(7).trim());
+      if (session) {
+        isPinAuthed = true;
+        sessionDeviceId = session.deviceId;
+      }
+    }
   }
 
-  return false;
+  // Check direct PIN
+  if (!isPinAuthed) {
+    const clientPin = (req.headers['x-airbridge-pin'] || req.query.pin || (req.body && req.body.pin) || '').toString().trim();
+    if (state.officeSecurity.pin && clientPin === state.officeSecurity.pin) {
+      isPinAuthed = true;
+    }
+  }
+
+  if (!isPinAuthed) {
+    return false;
+  }
+
+  // If host requires explicit approval for non-host peers:
+  if (state.officeSecurity.requireApproval) {
+    const devId = getClientDeviceId(req) || sessionDeviceId;
+    if (!devId) return false;
+    const approvedList = Array.isArray(state.approvedDevices) ? state.approvedDevices : [];
+    if (!approvedList.includes(devId)) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 /**
@@ -258,10 +308,18 @@ function createRequireOfficeAuth(getState) {
     if (isAuthorizedRequest(req, state)) {
       return next();
     }
+
+    const devId = getClientDeviceId(req);
+    const isPendingApproval = state.officeSecurity?.requireApproval &&
+      state.officeSecurity?.enabled &&
+      !isHostRequest(req) &&
+      (!devId || !(state.approvedDevices || []).includes(devId));
+
     return res.status(401).json({
-      error: 'Office Space is protected by Room PIN',
+      error: isPendingApproval ? 'Waiting for host approval' : 'Office Space is protected by Room PIN',
       officeSecurity: true,
-      requiresPin: true,
+      requiresPin: !isPendingApproval,
+      requiresApproval: isPendingApproval,
     });
   };
 }
@@ -281,6 +339,7 @@ module.exports = {
   recordFailedPinAttempt,
   resetPinAttempts,
   getPinLockoutInfo,
+  getClientDeviceId,
   isAuthorizedRequest,
   createRequireOfficeAuth,
 };

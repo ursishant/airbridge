@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { X, Copy, Check, RefreshCw, ShieldCheck, ShieldAlert } from 'lucide-react';
+import { X, Copy, Check, RefreshCw, ShieldCheck, ShieldAlert, UserCheck, UserX, Users } from 'lucide-react';
 import { copyToClipboard } from '../utils/clipboard';
 
 interface OfficeSecuritySettingsModalProps {
@@ -9,7 +9,9 @@ interface OfficeSecuritySettingsModalProps {
   officeSecurityEnabled: boolean;
   officePin: string;
   serverUrl?: string;
-  onConfigureSecurity: (enabled: boolean, pin?: string) => Promise<boolean>;
+  serverInfo?: any;
+  onConfigureSecurity: (enabled: boolean, pin?: string, requireApproval?: boolean) => Promise<boolean>;
+  onApproveDevice?: (deviceId: string, approved: boolean) => Promise<boolean>;
   showToast: (msg: string) => void;
 }
 
@@ -19,13 +21,19 @@ export const OfficeSecuritySettingsModal: React.FC<OfficeSecuritySettingsModalPr
   officeSecurityEnabled,
   officePin,
   serverUrl = '',
+  serverInfo,
   onConfigureSecurity,
+  onApproveDevice,
   showToast,
 }) => {
   const [copiedPin, setCopiedPin] = useState(false);
   const [copiedLink, setCopiedLink] = useState(false);
   const [isUpdating, setIsUpdating] = useState(false);
   const [customPin, setCustomPin] = useState(officePin || '');
+
+  const requireApproval = Boolean(serverInfo?.officeSecurity?.requireApproval);
+  const pendingRequests = serverInfo?.pendingApprovalRequests || [];
+  const approvedDevices = serverInfo?.approvedDevices || [];
 
   useEffect(() => {
     if (officePin) {
@@ -45,9 +53,22 @@ export const OfficeSecuritySettingsModal: React.FC<OfficeSecuritySettingsModalPr
     try {
       const nextEnabled = !officeSecurityEnabled;
       const pinToSet = officePin || customPin;
-      await onConfigureSecurity(nextEnabled, pinToSet);
+      await onConfigureSecurity(nextEnabled, pinToSet, requireApproval);
     } catch (err) {
       showToast('Failed to toggle office security');
+    } finally {
+      setIsUpdating(false);
+    }
+  };
+
+  const handleToggleRequireApproval = async () => {
+    if (isUpdating) return;
+    setIsUpdating(true);
+    try {
+      const pinToSet = officePin || customPin;
+      await onConfigureSecurity(officeSecurityEnabled, pinToSet, !requireApproval);
+    } catch (_) {
+      showToast('Failed to update approval mode');
     } finally {
       setIsUpdating(false);
     }
@@ -58,7 +79,7 @@ export const OfficeSecuritySettingsModal: React.FC<OfficeSecuritySettingsModalPr
     try {
       const randomPin = Math.floor(1000 + Math.random() * 9000).toString();
       setCustomPin(randomPin);
-      await onConfigureSecurity(true, randomPin);
+      await onConfigureSecurity(true, randomPin, requireApproval);
     } finally {
       setIsUpdating(false);
     }
@@ -103,7 +124,7 @@ export const OfficeSecuritySettingsModal: React.FC<OfficeSecuritySettingsModalPr
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.96, y: 6 }}
             transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
-            className="relative w-full max-w-md bg-white dark:bg-[#13151B] border border-black/[0.08] dark:border-white/[0.08] rounded-3xl shadow-2xl p-6 sm:p-7 text-[#0F1115] dark:text-[#F3F4F6]"
+            className="relative w-full max-w-md max-h-[90vh] overflow-y-auto bg-white dark:bg-[#13151B] border border-black/[0.08] dark:border-white/[0.08] rounded-3xl shadow-2xl p-6 sm:p-7 text-[#0F1115] dark:text-[#F3F4F6]"
             onClick={(e) => e.stopPropagation()}
           >
             {/* Close Button */}
@@ -122,10 +143,10 @@ export const OfficeSecuritySettingsModal: React.FC<OfficeSecuritySettingsModalPr
               </div>
               <div>
                 <h3 className="font-display text-lg font-black tracking-tight text-[#0F1115] dark:text-[#F3F4F6]">
-                  Office Wi-Fi Security Shield
+                  Office Space Security & Isolation
                 </h3>
                 <p className="text-xs text-[#64748B] dark:text-[#94A3B8] mt-0.5">
-                  Protect shared files and chat on multi-device office networks.
+                  Restricts file transfer to only approved colleagues on your Wi-Fi.
                 </p>
               </div>
             </div>
@@ -133,7 +154,7 @@ export const OfficeSecuritySettingsModal: React.FC<OfficeSecuritySettingsModalPr
             {/* Main Toggle Card */}
             <div 
               onClick={handleToggle}
-              className="bento-card rounded-2xl p-4 flex items-center justify-between gap-3 mb-4 border border-black/[0.06] dark:border-white/[0.08] cursor-pointer hover:border-black/20 dark:hover:border-white/20 transition-all select-none"
+              className="bento-card rounded-2xl p-4 flex items-center justify-between gap-3 mb-3 border border-black/[0.06] dark:border-white/[0.08] cursor-pointer hover:border-black/20 dark:hover:border-white/20 transition-all select-none"
             >
               <div>
                 <h4 className="font-display text-sm font-bold text-[#0F1115] dark:text-white">
@@ -162,6 +183,83 @@ export const OfficeSecuritySettingsModal: React.FC<OfficeSecuritySettingsModalPr
                 />
               </button>
             </div>
+
+            {/* Strict Device Approval Gate (5-people group isolation) */}
+            {officeSecurityEnabled && (
+              <div 
+                onClick={handleToggleRequireApproval}
+                className="bento-card rounded-2xl p-4 flex items-center justify-between gap-3 mb-4 border border-black/[0.06] dark:border-white/[0.08] cursor-pointer hover:border-black/20 dark:hover:border-white/20 transition-all select-none"
+              >
+                <div>
+                  <h4 className="font-display text-sm font-bold text-[#0F1115] dark:text-white flex items-center gap-1.5">
+                    <Users className="w-4 h-4 text-[#0071E3] dark:text-[#38BDF8]" />
+                    <span>Host Approval Whitelist</span>
+                  </h4>
+                  <p className="text-xs text-[#64748B] dark:text-[#94A3B8] mt-0.5">
+                    Colleagues must be manually approved by you before they can view or download files.
+                  </p>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleToggleRequireApproval();
+                  }}
+                  disabled={isUpdating}
+                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none ${
+                    requireApproval ? 'bg-[#0071E3]' : 'bg-black/20 dark:bg-white/20'
+                  } ${isUpdating ? 'opacity-60 cursor-wait' : 'cursor-pointer'}`}
+                >
+                  <span
+                    className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                      requireApproval ? 'translate-x-6' : 'translate-x-1'
+                    }`}
+                  />
+                </button>
+              </div>
+            )}
+
+            {/* Pending Requests Section (Live Host Gate) */}
+            {pendingRequests.length > 0 && onApproveDevice && (
+              <div className="mb-4 p-4 rounded-2xl bg-[#0071E3]/10 dark:bg-[#0071E3]/15 border border-[#0071E3]/30 space-y-2">
+                <span className="text-[11px] font-bold uppercase tracking-wider text-[#0071E3] dark:text-[#38BDF8]">
+                  Pending Connection Requests ({pendingRequests.length})
+                </span>
+                {pendingRequests.map((req: any) => (
+                  <div key={req.id} className="flex items-center justify-between p-2 rounded-xl bg-white dark:bg-[#1A1D26] border border-black/[0.08] dark:border-white/[0.08]">
+                    <div className="min-w-0 pr-2">
+                      <p className="text-xs font-bold text-[#0F1115] dark:text-white truncate">{req.name}</p>
+                      <p className="text-[10px] text-[#64748B] dark:text-[#94A3B8]">{req.ip}</p>
+                    </div>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <button
+                        onClick={() => onApproveDevice(req.id, true)}
+                        className="apple-press p-1.5 rounded-lg bg-[#10B981] text-white hover:bg-[#059669]"
+                        title="Approve access"
+                      >
+                        <UserCheck className="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        onClick={() => onApproveDevice(req.id, false)}
+                        className="apple-press p-1.5 rounded-lg bg-red-500 text-white hover:bg-red-600"
+                        title="Deny access"
+                      >
+                        <UserX className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Approved Devices Count */}
+            {officeSecurityEnabled && requireApproval && (
+              <div className="mb-4 px-3 py-2 rounded-xl bg-[#F8FAFC] dark:bg-white/[0.04] text-[11px] text-[#64748B] dark:text-[#94A3B8] flex items-center justify-between">
+                <span>Approved Colleagues:</span>
+                <span className="font-bold text-[#0F1115] dark:text-white">{approvedDevices.length} devices</span>
+              </div>
+            )}
 
             {/* PIN Card (when enabled) */}
             {officeSecurityEnabled ? (
@@ -215,7 +313,7 @@ export const OfficeSecuritySettingsModal: React.FC<OfficeSecuritySettingsModalPr
                   <span>Public Local Network Mode</span>
                 </p>
                 <p className="text-[11px] leading-relaxed">
-                  Anyone on this Wi-Fi network who visits your IP can browse and download shared files. Enable Office Protection to require a 4-digit PIN.
+                  Anyone on this Wi-Fi network who visits your IP can browse and download shared files. Enable Office Protection to isolate files to your group of 5.
                 </p>
               </div>
             )}
@@ -223,7 +321,7 @@ export const OfficeSecuritySettingsModal: React.FC<OfficeSecuritySettingsModalPr
             {/* Explanatory footer */}
             <div className="mt-5 pt-3 border-t border-black/[0.06] dark:border-white/[0.06] text-center">
               <p className="text-[10px] text-[#64748B] dark:text-[#94A3B8]">
-                QR codes automatically embed this PIN so mobile cameras connect with zero manual typing.
+                With Host Approval active, unexpected devices on the corporate Wi-Fi cannot see or download files even with the PIN.
               </p>
             </div>
           </motion.div>

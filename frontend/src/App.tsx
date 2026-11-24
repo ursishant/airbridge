@@ -53,6 +53,7 @@ export const App: React.FC = () => {
     officeSecurityEnabled,
     verifyAndSetOfficePin,
     configureOfficeSecurity,
+    handleApproveDevice,
     clipboardItems,
     chatMessages,
     isRinging,
@@ -955,7 +956,9 @@ export const App: React.FC = () => {
         officeSecurityEnabled={officeSecurityEnabled}
         officePin={officePin}
         serverUrl={serverInfo?.url}
+        serverInfo={serverInfo}
         onConfigureSecurity={configureOfficeSecurity}
+        onApproveDevice={handleApproveDevice}
         showToast={showToast}
       />
 

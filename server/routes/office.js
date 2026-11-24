@@ -6,14 +6,15 @@ const {
   getPinLockoutInfo,
   issueSession,
   getNormalizedRemoteAddress,
+  getClientDeviceId,
 } = require('../middleware/auth');
 
 function createOfficeRouter(options) {
   const router = express.Router();
   const { stateStore, broadcast } = options;
 
-  // Strict PIN verification with progressive lockout
-  router.post('/verify-pin', (req, res) => {
+  // Strict PIN verification & Approval check
+  router.post('/verify-pin', async (req, res) => {
     const ip = getNormalizedRemoteAddress(req);
     const lockout = getPinLockoutInfo(ip);
 
@@ -27,9 +28,14 @@ function createOfficeRouter(options) {
 
     const state = stateStore.getState();
     const rawPin = req.body && req.body.pin !== undefined ? String(req.body.pin).trim() : '';
+    const deviceId = getClientDeviceId(req);
+    const deviceName = req.body && req.body.deviceName ? String(req.body.deviceName).trim() : 'Colleague Device';
+    // For approval gating, if explicit isSimulatedPeer flag is provided in testing or remote header
+    const isSimulatedPeer = Boolean(req.headers['x-airbridge-simulated-peer']);
+    const isHost = isHostRequest(req) && !isSimulatedPeer;
 
     if (!state.officeSecurity?.enabled) {
-      const token = issueSession(ip);
+      const token = issueSession(ip, deviceId);
       res.cookie('airbridge_session', token, {
         httpOnly: true,
         sameSite: 'strict',
@@ -40,13 +46,62 @@ function createOfficeRouter(options) {
 
     if (state.officeSecurity.pin && rawPin === state.officeSecurity.pin) {
       resetPinAttempts(ip);
-      const token = issueSession(ip);
+
+      // If host has enabled "Require Approval" for non-host peers:
+      if (state.officeSecurity.requireApproval && !isHost) {
+        const approvedList = Array.isArray(state.approvedDevices) ? state.approvedDevices : [];
+        if (deviceId && approvedList.includes(deviceId)) {
+          // Already approved!
+          const token = issueSession(ip, deviceId);
+          res.cookie('airbridge_session', token, {
+            httpOnly: true,
+            sameSite: 'strict',
+            maxAge: 24 * 60 * 60 * 1000,
+          });
+          return res.json({ success: true, enabled: true, approved: true, token });
+        }
+
+        // Register pending approval request and notify host via WebSocket
+        if (deviceId) {
+          if (!Array.isArray(state.pendingApprovalRequests)) {
+            state.pendingApprovalRequests = [];
+          }
+          const existing = state.pendingApprovalRequests.find(r => r.id === deviceId);
+          if (!existing) {
+            state.pendingApprovalRequests.push({
+              id: deviceId,
+              name: deviceName,
+              ip,
+              requestedAt: Date.now(),
+            });
+          }
+          broadcast({
+            type: 'device_approval_requested',
+            device: {
+              id: deviceId,
+              name: deviceName,
+              ip,
+              requestedAt: Date.now(),
+            },
+          });
+        }
+
+        return res.json({
+          success: true,
+          enabled: true,
+          pendingApproval: true,
+          message: 'PIN verified. Waiting for host approval.',
+        });
+      }
+
+      // Standard PIN success
+      const token = issueSession(ip, deviceId);
       res.cookie('airbridge_session', token, {
         httpOnly: true,
         sameSite: 'strict',
         maxAge: 24 * 60 * 60 * 1000,
       });
-      return res.json({ success: true, enabled: true, token });
+      return res.json({ success: true, enabled: true, approved: true, token });
     }
 
     const updatedLockout = recordFailedPinAttempt(ip);
@@ -65,13 +120,74 @@ function createOfficeRouter(options) {
     });
   });
 
+  // Host Endpoint: Approve or Deny a connecting colleague device
+  router.post('/approve-device', async (req, res) => {
+    if (!isHostRequest(req)) {
+      return res.status(403).json({ error: 'Only the host machine can approve devices' });
+    }
+
+    const { deviceId, approved } = req.body || {};
+    if (!deviceId || typeof deviceId !== 'string') {
+      return res.status(400).json({ error: 'Missing deviceId' });
+    }
+
+    const state = stateStore.getState();
+    if (!Array.isArray(state.approvedDevices)) state.approvedDevices = [];
+    if (!Array.isArray(state.pendingApprovalRequests)) state.pendingApprovalRequests = [];
+
+    state.pendingApprovalRequests = state.pendingApprovalRequests.filter(r => r.id !== deviceId);
+
+    if (approved) {
+      if (!state.approvedDevices.includes(deviceId)) {
+        state.approvedDevices.push(deviceId);
+      }
+    } else {
+      state.approvedDevices = state.approvedDevices.filter(id => id !== deviceId);
+    }
+
+    await stateStore.save();
+
+    broadcast({
+      type: 'device_approval_resolved',
+      deviceId,
+      approved: Boolean(approved),
+    });
+
+    res.json({ success: true, approved: Boolean(approved), deviceId });
+  });
+
+  // Host Endpoint: Remove an approved device
+  router.post('/revoke-device', async (req, res) => {
+    if (!isHostRequest(req)) {
+      return res.status(403).json({ error: 'Only the host machine can revoke devices' });
+    }
+
+    const { deviceId } = req.body || {};
+    if (!deviceId) return res.status(400).json({ error: 'Missing deviceId' });
+
+    const state = stateStore.getState();
+    state.approvedDevices = (state.approvedDevices || []).filter(id => id !== deviceId);
+    await stateStore.save();
+
+    broadcast({
+      type: 'device_revoked',
+      deviceId,
+    });
+
+    res.json({ success: true, revoked: deviceId });
+  });
+
   // Configure Office Security
   router.post('/configure', async (req, res) => {
     const state = stateStore.getState();
-    const { enabled, regenerate, pin } = req.body || {};
+    const { enabled, regenerate, pin, requireApproval } = req.body || {};
 
     if (typeof enabled === 'boolean') {
       state.officeSecurity.enabled = enabled;
+    }
+
+    if (typeof requireApproval === 'boolean') {
+      state.officeSecurity.requireApproval = requireApproval;
     }
 
     if (regenerate || !state.officeSecurity.pin) {
@@ -91,10 +207,16 @@ function createOfficeRouter(options) {
       officeSecurity: {
         enabled: state.officeSecurity.enabled,
         pin: state.officeSecurity.pin,
+        requireApproval: state.officeSecurity.requireApproval,
       },
+      approvedCount: (state.approvedDevices || []).length,
     });
 
-    res.json({ success: true, officeSecurity: state.officeSecurity });
+    res.json({
+      success: true,
+      officeSecurity: state.officeSecurity,
+      approvedDevices: state.approvedDevices,
+    });
   });
 
   return router;

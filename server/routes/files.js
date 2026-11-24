@@ -4,6 +4,7 @@ const fs = require('fs');
 const { spawn, execFile } = require('child_process');
 const { ZipArchive } = require('archiver');
 const { computeFileSha256 } = require('../lib/chunkReaper');
+const { isHostRequest, getClientDeviceId } = require('../middleware/auth');
 
 function createFilesRouter(options) {
   const router = express.Router();
@@ -17,6 +18,7 @@ function createFilesRouter(options) {
     isMac,
     isWindows,
     isLinux,
+    stateStore,
   } = options;
 
   let cachedFilesList = null;
@@ -49,16 +51,92 @@ function createFilesRouter(options) {
     return { count, totalBytes };
   }
 
-  // Upload endpoint (supports unconstrained file batches)
+  /**
+   * Checks whether the requesting client is allowed to see or download this file.
+   * Host is ALWAYS allowed.
+   * If file is targeted, clientDeviceId must be in recipientIds list.
+   * Checks download limits and expiration.
+   */
+  function isClientPermittedForFile(req, filename) {
+    const isSimulatedPeer = Boolean(req.headers && req.headers['x-airbridge-simulated-peer']);
+    if (isHostRequest(req) && !isSimulatedPeer) {
+      return { permitted: true };
+    }
+
+    const state = stateStore.getState();
+    const targetInfo = (state.targetedFiles || {})[filename];
+    if (!targetInfo) {
+      // Normal untargeted file: visible to anyone authorized in room
+      return { permitted: true };
+    }
+
+    const clientDevId = getClientDeviceId(req);
+
+    // Check expiration
+    if (targetInfo.expiresAt && Date.now() > targetInfo.expiresAt) {
+      return { permitted: false, reason: 'File link has expired' };
+    }
+
+    // Check max download limit
+    if (targetInfo.maxDownloads && targetInfo.downloadCount >= targetInfo.maxDownloads) {
+      return { permitted: false, reason: 'File download limit reached' };
+    }
+
+    // Check recipient whitelist
+    if (Array.isArray(targetInfo.recipientIds) && targetInfo.recipientIds.length > 0) {
+      if (!clientDevId || !targetInfo.recipientIds.includes(clientDevId)) {
+        return { permitted: false, reason: 'This file is targeted to specific recipients only' };
+      }
+    }
+
+    return { permitted: true, targetInfo };
+  }
+
+  // Upload endpoint (supports targeted recipient list and ephemeral limits)
   router.post('/upload', upload.array('files'), (req, res) => {
     if (!req.files || req.files.length === 0) {
       return res.status(400).json({ error: 'No files uploaded' });
+    }
+
+    const state = stateStore.getState();
+    if (!state.targetedFiles) state.targetedFiles = {};
+
+    let targetRecipients = null;
+    let maxDownloads = null;
+    let expiresMinutes = null;
+
+    if (req.body && req.body.recipients) {
+      try {
+        const parsed = typeof req.body.recipients === 'string' ? JSON.parse(req.body.recipients) : req.body.recipients;
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          targetRecipients = parsed.map(String);
+        }
+      } catch (_) {}
+    }
+
+    if (req.body && req.body.maxDownloads) {
+      const md = parseInt(req.body.maxDownloads, 10);
+      if (!isNaN(md) && md > 0) maxDownloads = md;
+    }
+
+    if (req.body && req.body.expiresMinutes) {
+      const em = parseInt(req.body.expiresMinutes, 10);
+      if (!isNaN(em) && em > 0) expiresMinutes = em;
     }
 
     const uploadedFiles = req.files.map((file) => {
       const relFromUploads = path.relative(UPLOADS_DIR, file.path).replace(/\\/g, '/');
       const isInsideFolder = relFromUploads.includes('/');
       const topFolder = isInsideFolder ? relFromUploads.split('/')[0] : null;
+
+      if (targetRecipients || maxDownloads || expiresMinutes) {
+        state.targetedFiles[file.filename] = {
+          recipientIds: targetRecipients || [],
+          maxDownloads: maxDownloads || null,
+          downloadCount: 0,
+          expiresAt: expiresMinutes ? Date.now() + expiresMinutes * 60 * 1000 : null,
+        };
+      }
 
       return {
         name: file.filename,
@@ -70,10 +148,14 @@ function createFilesRouter(options) {
         path: `/api/files/${relFromUploads.split('/').map(encodeURIComponent).join('/')}`,
         fullPath: file.path,
         uploadedAt: Date.now(),
+        targeted: Boolean(targetRecipients),
       };
     });
 
+    stateStore.save();
     invalidateCache();
+
+    // Broadcast WebSocket notification only to targeted recipients (or everyone if untargeted)
     broadcastFilesUploaded(uploadedFiles, req.body.sender || 'Unknown Device');
 
     res.json({
@@ -104,6 +186,7 @@ function createFilesRouter(options) {
         relativePath,
         sender,
         expectedSha256,
+        recipients,
       } = req.body;
 
       if (!req.file || !fileId || chunkIndex === undefined || totalChunks === undefined || !filename) {
@@ -171,7 +254,6 @@ function createFilesRouter(options) {
 
         fs.renameSync(resolvedTempPath, finalDest);
 
-        // Optional SHA-256 Checksum verification
         if (expectedSha256 && typeof expectedSha256 === 'string') {
           const actualSha256 = await computeFileSha256(finalDest);
           if (actualSha256.toLowerCase() !== expectedSha256.trim().toLowerCase()) {
@@ -182,7 +264,6 @@ function createFilesRouter(options) {
 
         const stats = fs.statSync(finalDest);
         const relFromUploads = path.relative(UPLOADS_DIR, finalDest).replace(/\\/g, '/');
-        const isInsideFolder = relFromUploads.includes('/');
         const topFolder = isInsideFolder ? relFromUploads.split('/')[0] : null;
 
         const fileInfo = {
@@ -222,7 +303,6 @@ function createFilesRouter(options) {
   // Parallel Chunk Upload
   const activeTransfers = new Map();
 
-  // Periodic reaper for active abandoned transfers
   setInterval(() => {
     const now = Date.now();
     for (const [id, t] of activeTransfers.entries()) {
@@ -354,7 +434,6 @@ function createFilesRouter(options) {
 
         fs.renameSync(transfer.partPath, finalDest);
 
-        // Optional SHA-256 Checksum verification
         if (transfer.expectedSha256) {
           const actualSha256 = await computeFileSha256(finalDest);
           if (actualSha256.toLowerCase() !== transfer.expectedSha256.toLowerCase()) {
@@ -442,10 +521,13 @@ function createFilesRouter(options) {
     }
   });
 
-  // List files (with 2-second high-throughput cache)
+  // List files (filters targeted files for unauthorized peers)
   router.get('/files', (req, res) => {
+    const isHost = isHostRequest(req);
     const now = Date.now();
-    if (cachedFilesList && (now - lastFilesListTime < 2000)) {
+
+    // Cache only applies to host views to prevent leakage across peers
+    if (isHost && cachedFilesList && (now - lastFilesListTime < 2000)) {
       return res.json({ files: cachedFilesList });
     }
 
@@ -457,6 +539,13 @@ function createFilesRouter(options) {
       const files = [];
       for (const item of items) {
         if (item.startsWith('.')) continue;
+
+        // Security: Filter targeted files if client is not recipient or host
+        const access = isClientPermittedForFile(req, item);
+        if (!access.permitted) {
+          continue;
+        }
+
         const fullPath = path.join(UPLOADS_DIR, item);
         try {
           const stats = fs.statSync(fullPath);
@@ -483,13 +572,15 @@ function createFilesRouter(options) {
       }
 
       files.sort((a, b) => b.modifiedAt - a.modifiedAt);
-      cachedFilesList = files;
-      lastFilesListTime = now;
+      if (isHost) {
+        cachedFilesList = files;
+        lastFilesListTime = now;
+      }
       res.json({ files });
     });
   });
 
-  // Download single file with Range support
+  // Download single file with Range support & targeted check
   router.get(/^\/files\/(.*)/, (req, res) => {
     const reqPath = decodeURIComponent(req.params[0] || '');
     const ROOT = path.resolve(UPLOADS_DIR);
@@ -506,9 +597,22 @@ function createFilesRouter(options) {
     }
 
     const filename = path.basename(filePath);
+
+    // Security: Check targeted file permissions
+    const access = isClientPermittedForFile(req, filename);
+    if (!access.permitted) {
+      return res.status(403).json({ error: access.reason || 'Forbidden' });
+    }
+
     const stat = fs.statSync(filePath);
     if (!stat.isFile()) {
       return res.status(400).json({ error: 'Not a file' });
+    }
+
+    // Increment download count if targeted
+    if (access.targetInfo) {
+      access.targetInfo.downloadCount = (access.targetInfo.downloadCount || 0) + 1;
+      stateStore.save();
     }
 
     const fileSize = stat.size;
@@ -564,13 +668,18 @@ function createFilesRouter(options) {
       return res.status(404).json({ error: 'File not found' });
     }
 
+    const filename = path.basename(filePath);
+    const access = isClientPermittedForFile(req, filename);
+    if (!access.permitted) {
+      return res.status(403).json({ error: access.reason || 'Forbidden' });
+    }
+
     const stat = fs.statSync(filePath);
     if (!stat.isFile()) {
       return res.status(400).json({ error: 'Not a file' });
     }
 
     const fileSize = stat.size;
-    const filename = path.basename(filePath);
 
     res.setHeader('Accept-Ranges', 'bytes');
     res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"; filename*=UTF-8''${encodeURIComponent(filename)}`);
@@ -623,6 +732,12 @@ function createFilesRouter(options) {
 
     if (!fs.existsSync(filePath)) {
       return res.status(404).json({ error: 'File not found' });
+    }
+
+    const filename = path.basename(filePath);
+    const access = isClientPermittedForFile(req, filename);
+    if (!access.permitted) {
+      return res.status(403).json({ error: access.reason || 'Forbidden' });
     }
 
     res.sendFile(filePath);
@@ -773,6 +888,11 @@ function createFilesRouter(options) {
       const deleted = deleteFileOrDirectory(filename);
       if (deleted) {
         invalidateCache();
+        const state = stateStore.getState();
+        if (state.targetedFiles && state.targetedFiles[filename]) {
+          delete state.targetedFiles[filename];
+          stateStore.save();
+        }
         broadcast({ type: 'file_deleted', filename });
         return res.json({ success: true, filename });
       }

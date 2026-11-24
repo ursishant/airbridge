@@ -1,5 +1,5 @@
 const express = require('express');
-const { isHostRequest, isAuthorizedRequest } = require('../middleware/auth');
+const { isHostRequest, isAuthorizedRequest, getClientDeviceId } = require('../middleware/auth');
 
 function createInfoRouter(options) {
   const router = express.Router();
@@ -21,6 +21,14 @@ function createInfoRouter(options) {
     const isHost = isHostRequest(req);
     const state = stateStore.getState();
     const isAuthed = isHost || isAuthorizedRequest(req, state);
+    const devId = getClientDeviceId(req);
+
+    const isPendingApproval = Boolean(
+      state.officeSecurity?.enabled &&
+      state.officeSecurity?.requireApproval &&
+      !isHost &&
+      (!devId || !(state.approvedDevices || []).includes(devId))
+    );
 
     let osDisplay = 'macOS ' + require('os').release();
     if (isWindows) {
@@ -46,8 +54,12 @@ function createInfoRouter(options) {
       officeSecurity: {
         enabled: Boolean(state.officeSecurity?.enabled),
         requiresAuth: !isAuthed,
+        requireApproval: Boolean(state.officeSecurity?.requireApproval),
+        isPendingApproval,
         pin: isAuthed ? state.officeSecurity?.pin : undefined,
       },
+      approvedDevices: isHost ? (state.approvedDevices || []) : undefined,
+      pendingApprovalRequests: isHost ? (state.pendingApprovalRequests || []) : undefined,
     });
   });
 

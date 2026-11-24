@@ -39,7 +39,11 @@ class StateStore {
       officeSecurity: {
         enabled: false,
         pin: String(Math.floor(1000 + Math.random() * 9000)),
+        requireApproval: false, // When true, host must explicitly approve each non-host peer
       },
+      approvedDevices: [], // Array of approved device IDs: ['dev_xxx', ...]
+      pendingApprovalRequests: [], // Array of pending requests: [{ id, name, ip, os, requestedAt }]
+      targetedFiles: {}, // Maps filename -> { recipientIds: string[], maxDownloads?: number, downloadCount: number, expiresAt?: number }
     };
 
     this.writeQueue = Promise.resolve();
@@ -80,13 +84,18 @@ class StateStore {
         if (Array.isArray(parsed.chatHistory)) this.state.chatHistory = parsed.chatHistory;
         if (Array.isArray(parsed.clipboardHistory)) this.state.clipboardHistory = parsed.clipboardHistory;
         if (Array.isArray(parsed.knownDevices)) this.state.knownDevices = parsed.knownDevices;
+        if (Array.isArray(parsed.approvedDevices)) this.state.approvedDevices = parsed.approvedDevices;
+        if (parsed.targetedFiles && typeof parsed.targetedFiles === 'object') {
+          this.state.targetedFiles = parsed.targetedFiles;
+        }
         if (parsed.officeSecurity && typeof parsed.officeSecurity === 'object') {
           this.state.officeSecurity.enabled = Boolean(parsed.officeSecurity.enabled);
           if (parsed.officeSecurity.pin) {
             this.state.officeSecurity.pin = String(parsed.officeSecurity.pin);
           }
+          this.state.officeSecurity.requireApproval = Boolean(parsed.officeSecurity.requireApproval);
         }
-        console.log(`[StateStore] Loaded state: ${this.state.chatHistory.length} chats, ${this.state.clipboardHistory.length} clipboard items.`);
+        console.log(`[StateStore] Loaded state: ${this.state.chatHistory.length} chats, ${this.state.clipboardHistory.length} clipboard items, ${this.state.approvedDevices.length} approved devices.`);
       } catch (err) {
         console.error('[StateStore] Error reading state file, starting fresh:', err.message);
       }
@@ -98,11 +107,7 @@ class StateStore {
   }
 
   /**
-   * Serialized atomic async write:
-   * 1. Chains onto internal writeQueue promise.
-   * 2. Writes to temporary file in same directory.
-   * 3. Sets permissions (0o600).
-   * 4. Uses atomic fs.promises.rename.
+   * Serialized atomic async write
    */
   async save() {
     this.writeQueue = this.writeQueue.then(async () => {
@@ -115,9 +120,12 @@ class StateStore {
           chatHistory: Array.isArray(this.state.chatHistory) ? this.state.chatHistory : [],
           clipboardHistory: Array.isArray(this.state.clipboardHistory) ? this.state.clipboardHistory : [],
           knownDevices: Array.isArray(this.state.knownDevices) ? this.state.knownDevices : [],
+          approvedDevices: Array.isArray(this.state.approvedDevices) ? this.state.approvedDevices : [],
+          targetedFiles: this.state.targetedFiles || {},
           officeSecurity: {
             enabled: Boolean(this.state.officeSecurity?.enabled),
             pin: String(this.state.officeSecurity?.pin || ''),
+            requireApproval: Boolean(this.state.officeSecurity?.requireApproval),
           },
         }, null, 2);
 
