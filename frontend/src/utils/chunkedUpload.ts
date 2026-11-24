@@ -24,6 +24,8 @@ const LARGE_FILE_THRESHOLD = 16 * 1024 * 1024; // 16MB — switch to chunked str
 const MAX_CONCURRENT_BATCHES = 8; // 8 concurrent file/batch workers for LAN folder uploads
 const MAX_CONCURRENT_LARGE_FILES = 3; // Pipeline 3 large files simultaneously
 
+import { getDeviceId } from './device';
+
 function getStoredOfficePin(): string {
   try {
     return localStorage.getItem('airbridge_office_pin') || '';
@@ -94,6 +96,7 @@ function uploadOneChunk(
       if (pin) {
         xhr.setRequestHeader('x-airbridge-pin', pin);
       }
+      xhr.setRequestHeader('x-airbridge-device-id', getDeviceId());
 
       xhr.send(formData);
     });
@@ -209,6 +212,7 @@ function uploadSmallBatch(
     if (pin) {
       xhr.setRequestHeader('x-airbridge-pin', pin);
     }
+    xhr.setRequestHeader('x-airbridge-device-id', getDeviceId());
 
     xhr.send(formData);
   });

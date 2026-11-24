@@ -44,6 +44,17 @@ describe('Office Isolation & Targeted Group Sharing Security Tests', () => {
       // Verify pending request was registered on host
       assert.ok(state.pendingApprovalRequests.some(r => r.id === 'dev_stranger_on_wifi'));
 
+      // Check /api/office/approval-status before approval
+      const statusPendingRes = await fetch(`${baseUrl}/api/office/approval-status`, {
+        headers: {
+          'x-airbridge-device-id': 'dev_stranger_on_wifi',
+          'x-airbridge-simulated-peer': 'true',
+        },
+      });
+      const statusPending = await statusPendingRes.json();
+      assert.equal(statusPending.approved, false);
+      assert.equal(statusPending.pending, true);
+
       // 2. Host approves the device
       const approveRes = await fetch(`${baseUrl}/api/office/approve-device`, {
         method: 'POST',
@@ -55,6 +66,17 @@ describe('Office Isolation & Targeted Group Sharing Security Tests', () => {
       });
       assert.equal(approveRes.status, 200);
       assert.ok(state.approvedDevices.includes('dev_stranger_on_wifi'));
+
+      // Check /api/office/approval-status after approval
+      const statusApprovedRes = await fetch(`${baseUrl}/api/office/approval-status`, {
+        headers: {
+          'x-airbridge-device-id': 'dev_stranger_on_wifi',
+          'x-airbridge-simulated-peer': 'true',
+        },
+      });
+      const statusApproved = await statusApprovedRes.json();
+      assert.equal(statusApproved.approved, true);
+      assert.equal(statusApproved.pending, false);
 
       // 3. Now the colleague re-verifies PIN and gets approved access token
       const approvedRes = await fetch(`${baseUrl}/api/office/verify-pin`, {

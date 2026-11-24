@@ -13,6 +13,27 @@ function createOfficeRouter(options) {
   const router = express.Router();
   const { stateStore, broadcast } = options;
 
+  // Check approval status (polled by waiting peer devices)
+  router.get('/approval-status', (req, res) => {
+    const state = stateStore.getState();
+    const isSimulatedPeer = Boolean(req.headers['x-airbridge-simulated-peer'] || (req.query && req.query.simulatePeer === '1'));
+    const isHost = isHostRequest(req) && !isSimulatedPeer;
+
+    if (!state.officeSecurity?.enabled || !state.officeSecurity?.requireApproval || isHost) {
+      return res.json({ approved: true, pending: false });
+    }
+
+    const deviceId = getClientDeviceId(req);
+    const approvedList = Array.isArray(state.approvedDevices) ? state.approvedDevices : [];
+    const isApproved = Boolean(deviceId && approvedList.includes(deviceId));
+
+    return res.json({
+      approved: isApproved,
+      pending: !isApproved,
+      deviceId,
+    });
+  });
+
   // Strict PIN verification & Approval check
   router.post('/verify-pin', async (req, res) => {
     const ip = getNormalizedRemoteAddress(req);
@@ -28,10 +49,10 @@ function createOfficeRouter(options) {
 
     const state = stateStore.getState();
     const rawPin = req.body && req.body.pin !== undefined ? String(req.body.pin).trim() : '';
-    const deviceId = getClientDeviceId(req);
-    const deviceName = req.body && req.body.deviceName ? String(req.body.deviceName).trim() : 'Colleague Device';
+    const deviceId = (req.body && req.body.deviceId ? String(req.body.deviceId).trim() : null) || getClientDeviceId(req);
+    const deviceName = (req.body && req.body.deviceName ? String(req.body.deviceName).trim() : null) || 'Colleague Device';
     // For approval gating, if explicit isSimulatedPeer flag is provided in testing or remote header
-    const isSimulatedPeer = Boolean(req.headers['x-airbridge-simulated-peer']);
+    const isSimulatedPeer = Boolean(req.headers['x-airbridge-simulated-peer'] || (req.query && req.query.simulatePeer === '1'));
     const isHost = isHostRequest(req) && !isSimulatedPeer;
 
     if (!state.officeSecurity?.enabled) {
@@ -41,7 +62,7 @@ function createOfficeRouter(options) {
         sameSite: 'strict',
         maxAge: 24 * 60 * 60 * 1000,
       });
-      return res.json({ success: true, enabled: false, token });
+      return res.json({ success: true, enabled: false, token, deviceId });
     }
 
     if (state.officeSecurity.pin && rawPin === state.officeSecurity.pin) {
@@ -58,7 +79,7 @@ function createOfficeRouter(options) {
             sameSite: 'strict',
             maxAge: 24 * 60 * 60 * 1000,
           });
-          return res.json({ success: true, enabled: true, approved: true, token });
+          return res.json({ success: true, enabled: true, approved: true, token, deviceId });
         }
 
         // Register pending approval request and notify host via WebSocket
@@ -74,7 +95,12 @@ function createOfficeRouter(options) {
               ip,
               requestedAt: Date.now(),
             });
+          } else {
+            existing.name = deviceName;
+            existing.ip = ip;
+            existing.requestedAt = Date.now();
           }
+          await stateStore.save();
           broadcast({
             type: 'device_approval_requested',
             device: {
@@ -90,6 +116,7 @@ function createOfficeRouter(options) {
           success: true,
           enabled: true,
           pendingApproval: true,
+          deviceId,
           message: 'PIN verified. Waiting for host approval.',
         });
       }
@@ -101,7 +128,7 @@ function createOfficeRouter(options) {
         sameSite: 'strict',
         maxAge: 24 * 60 * 60 * 1000,
       });
-      return res.json({ success: true, enabled: true, approved: true, token });
+      return res.json({ success: true, enabled: true, approved: true, token, deviceId });
     }
 
     const updatedLockout = recordFailedPinAttempt(ip);

@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import confetti from 'canvas-confetti';
-import { Download, Zap, ArrowRight, Volume2 } from 'lucide-react';
+import { Download, Zap, ArrowRight, Volume2, Users, UserCheck, UserX } from 'lucide-react';
 import { Header } from './components/Header';
 import { DynamicIsland } from './components/DynamicIsland';
 import { DragDropPortal } from './components/DragDropPortal';
@@ -404,6 +404,55 @@ export const App: React.FC = () => {
             </button>
           </div>
         </div>
+
+        {/* Live Host Connection Approval Banner (1-Click Action for 5-Person Whitelist) */}
+        {serverInfo?.isHost && (serverInfo?.pendingApprovalRequests || []).length > 0 && (() => {
+          const firstReq = serverInfo.pendingApprovalRequests![0];
+          return (
+            <motion.div
+              initial={{ opacity: 0, y: -6 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="rounded-3xl p-4 sm:p-5 bg-gradient-to-r from-[#0071E3]/15 via-[#38BDF8]/10 to-[#0071E3]/5 border-2 border-[#0071E3]/40 shadow-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4"
+            >
+              <div className="flex items-center gap-3.5 min-w-0">
+                <div className="w-12 h-12 rounded-2xl bg-[#0071E3] text-white flex items-center justify-center shrink-0 shadow-md animate-pulse">
+                  <Users className="w-6 h-6" />
+                </div>
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <h4 className="font-display text-sm sm:text-base font-bold text-[#0F1115] dark:text-white">
+                      Colleague Connection Request ({serverInfo.pendingApprovalRequests!.length})
+                    </h4>
+                    <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-[#0071E3] text-white font-black">
+                      APPROVAL NEEDED
+                    </span>
+                  </div>
+                  <p className="text-xs text-[#64748B] dark:text-[#94A3B8] mt-0.5 truncate">
+                    <span className="font-bold text-[#0F1115] dark:text-white">{firstReq.name}</span>
+                    {' '}({firstReq.ip}) verified the PIN and is requesting access to your files.
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 self-stretch sm:self-auto shrink-0 justify-end">
+                <button
+                  onClick={() => handleApproveDevice(firstReq.id, true)}
+                  className="apple-press flex-1 sm:flex-none flex items-center justify-center gap-1.5 px-4 py-2 rounded-xl text-xs font-bold bg-[#10B981] hover:bg-[#059669] text-white shadow-md transition-all"
+                >
+                  <UserCheck className="w-4 h-4" />
+                  <span>Approve Access</span>
+                </button>
+                <button
+                  onClick={() => handleApproveDevice(firstReq.id, false)}
+                  className="apple-press flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold bg-red-500 hover:bg-red-600 text-white shadow-md transition-all"
+                >
+                  <UserX className="w-4 h-4" />
+                  <span>Deny</span>
+                </button>
+              </div>
+            </motion.div>
+          );
+        })()}
 
         {/* Executive 4-Card Bento Metric Deck (Salesforce / Cardiology Architecture) */}
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-3.5 sm:gap-4.5">
@@ -948,6 +997,7 @@ export const App: React.FC = () => {
         isOpen={isOfficeLocked}
         onVerifyPin={verifyAndSetOfficePin}
         showToast={showToast}
+        serverInfo={serverInfo}
       />
 
       <OfficeSecuritySettingsModal

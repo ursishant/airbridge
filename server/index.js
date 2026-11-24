@@ -324,6 +324,17 @@ const connectedClients = new Map();
 
 // Helper to broadcast WebSocket messages
 function broadcast(message, excludeWs = null) {
+  if (message && message.type === 'device_approval_resolved') {
+    for (const [clientWs, info] of connectedClients.entries()) {
+      if (info && info.id === message.deviceId) {
+        clientWs.isAuthenticated = Boolean(message.approved);
+        if (clientWs.isAuthenticated && typeof clientWs.sendClientInit === 'function') {
+          try { clientWs.sendClientInit(); } catch (_) {}
+        }
+      }
+    }
+  }
+
   const data = JSON.stringify(message);
   wss.clients.forEach((client) => {
     if (client !== excludeWs && client.readyState === WebSocket.OPEN) {
@@ -551,6 +562,8 @@ wss.on('connection', (ws, req) => {
     }));
   }
 
+  ws.sendClientInit = () => sendClientInit(ws);
+
   if (isAuthenticated) {
     sendClientInit(ws);
     broadcastDevicesList();
@@ -558,6 +571,8 @@ wss.on('connection', (ws, req) => {
     ws.send(JSON.stringify({
       type: 'auth_required',
       officeSecurity: true,
+      requiresApproval: Boolean(state.officeSecurity?.requireApproval),
+      clientId,
     }));
   }
 
@@ -568,7 +583,20 @@ wss.on('connection', (ws, req) => {
 
       if (msg.type === 'authenticate') {
         const clientPin = (msg.pin || '').toString().trim();
+        const msgDeviceId = msg.deviceId || queryId || clientId;
         if (clientPin === s.officeSecurity?.pin) {
+          if (s.officeSecurity?.requireApproval && !ws.isHost) {
+            const approvedList = Array.isArray(s.approvedDevices) ? s.approvedDevices : [];
+            if (!approvedList.includes(msgDeviceId)) {
+              ws.isAuthenticated = false;
+              ws.send(JSON.stringify({
+                type: 'pending_approval',
+                deviceId: msgDeviceId,
+                message: 'Waiting for host approval',
+              }));
+              return;
+            }
+          }
           ws.isAuthenticated = true;
           sendClientInit(ws);
           broadcastDevicesList();

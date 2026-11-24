@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { SoundEffects } from '../components/SoundEffects';
 import type { ToastInfo } from '../components/DynamicIsland';
+import { getDeviceId, getDeviceName } from '../utils/device';
 
 export interface ConnectedDevice {
   id: string;
@@ -116,18 +117,7 @@ export function useWebSocket() {
   officePinRef.current = officePin;
   
   // Persistent device ID - stable for the entire browser session
-  const [myDeviceId] = useState<string>(() => {
-    try {
-      let id = localStorage.getItem('airbridge_device_id');
-      if (!id) {
-        id = 'dev_' + Math.random().toString(36).substring(2, 9);
-        localStorage.setItem('airbridge_device_id', id);
-      }
-      return id;
-    } catch (e) {
-      return 'dev_' + Math.random().toString(36).substring(2, 9);
-    }
-  });
+  const [myDeviceId] = useState<string>(() => getDeviceId());
 
   // Cached devices to prevent blank flash on refresh, strictly deduplicated
   const [devices, setDevices] = useState<ConnectedDevice[]>(() => {
@@ -615,35 +605,55 @@ export function useWebSocket() {
   }, []);
 
   // Office PIN Verification
-  const verifyAndSetOfficePin = useCallback(async (pin: string): Promise<boolean> => {
+  const verifyAndSetOfficePin = useCallback(async (pin: string): Promise<{ success: boolean; pendingApproval?: boolean; message?: string } | boolean> => {
     const cleanPin = pin.trim();
+    const devId = myDeviceIdRef.current || getDeviceId();
+    const devName = deviceNameRef.current || getDeviceName();
+
     try {
       const res = await fetch('/api/office/verify-pin', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pin: cleanPin }),
+        headers: {
+          'Content-Type': 'application/json',
+          'x-airbridge-device-id': devId,
+        },
+        body: JSON.stringify({
+          pin: cleanPin,
+          deviceId: devId,
+          deviceName: devName,
+        }),
       });
-      if (res.ok) {
+
+      const data = await res.json().catch(() => ({}));
+
+      if (res.ok && data.success) {
         setOfficePin(cleanPin);
         officePinRef.current = cleanPin;
-        setIsOfficeLocked(false);
         try {
           localStorage.setItem('airbridge_office_pin', cleanPin);
         } catch (e) {}
 
+        if (data.pendingApproval) {
+          setIsOfficeLocked(true);
+          showToast('Request sent! Waiting for host approval...');
+          return { success: true, pendingApproval: true, message: data.message };
+        }
+
+        setIsOfficeLocked(false);
         if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-          wsRef.current.send(JSON.stringify({ type: 'authenticate', pin: cleanPin }));
+          wsRef.current.send(JSON.stringify({ type: 'authenticate', pin: cleanPin, deviceId: devId }));
         } else {
           connect();
         }
         showToast('Office Workspace Unlocked');
-        return true;
+        return { success: true, pendingApproval: false };
       }
-      showToast('Incorrect Office PIN');
-      return false;
+
+      showToast(data.error || 'Incorrect Office PIN');
+      return { success: false, message: data.error };
     } catch (e) {
       showToast('PIN Verification Failed');
-      return false;
+      return { success: false, message: 'Connection error' };
     }
   }, [connect, showToast]);
 
@@ -670,6 +680,24 @@ export function useWebSocket() {
             localStorage.setItem('airbridge_office_pin', data.officeSecurity.pin);
           } catch (e) {}
         }
+        setServerInfo((prev) => {
+          if (!prev) return null;
+          return {
+            ...prev,
+            officeSecurity: prev.officeSecurity ? {
+              ...prev.officeSecurity,
+              enabled: data.officeSecurity.enabled,
+              pin: data.officeSecurity.pin,
+              requireApproval: data.officeSecurity.requireApproval,
+            } : {
+              enabled: data.officeSecurity.enabled,
+              requiresAuth: true,
+              pin: data.officeSecurity.pin,
+              requireApproval: data.officeSecurity.requireApproval,
+            },
+            approvedDevices: data.approvedDevices || prev.approvedDevices || [],
+          };
+        });
         showToast(enabled ? 'Office Security & Space Configured' : 'Office Security Disabled');
         return true;
       }

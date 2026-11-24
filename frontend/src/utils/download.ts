@@ -1,3 +1,5 @@
+import { getDeviceId } from './device';
+
 function getStoredOfficePin(): string {
   try {
     return localStorage.getItem('airbridge_office_pin') || '';
@@ -77,8 +79,10 @@ async function downloadFileParallel(
   onProgress?: (info: DownloadProgressInfo) => void
 ): Promise<boolean> {
   const pin = getStoredOfficePin();
+  const devId = getDeviceId();
   const authHeaders: Record<string, string> = { Accept: '*/*' };
   if (pin) authHeaders['x-airbridge-pin'] = pin;
+  if (devId) authHeaders['x-airbridge-device-id'] = devId;
 
   const rangedUrl = url.replace('/api/files/', '/api/files-ranged/');
   const chunkSize = getOptimalDownloadChunkSize(fileSize);
@@ -160,13 +164,18 @@ export async function downloadFileSafely(
   fileSize?: number
 ): Promise<boolean> {
   const pin = getStoredOfficePin();
+  const devId = getDeviceId();
   let authedUrl = url;
   if (pin && !authedUrl.includes('pin=')) {
     authedUrl += (authedUrl.includes('?') ? '&' : '?') + `pin=${encodeURIComponent(pin)}`;
   }
+  if (devId && !authedUrl.includes('deviceId=')) {
+    authedUrl += (authedUrl.includes('?') ? '&' : '?') + `deviceId=${encodeURIComponent(devId)}`;
+  }
 
   const authHeaders: Record<string, string> = { 'Accept': '*/*' };
   if (pin) authHeaders['x-airbridge-pin'] = pin;
+  if (devId) authHeaders['x-airbridge-device-id'] = devId;
 
   // On Mobile (Android / iOS): ALWAYS stream directly via native OS download manager!
   // Android DownloadManager / iOS Safari streams directly to device storage at full gigabit Wi-Fi line rate

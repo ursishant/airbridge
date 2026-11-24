@@ -21,6 +21,7 @@ import {
 import type { UploadedFileItem, ServerInfo } from '../hooks/useWebSocket';
 import { M3FolderIcon, M3DocumentIcon } from './M3Icons';
 import { ConfirmModal } from './ConfirmModal';
+import { getAuthHeaders } from '../utils/device';
 import { downloadFileSafely } from '../utils/download';
 
 interface FileItemWithFolder extends UploadedFileItem {
@@ -48,13 +49,6 @@ export const FileTransfer: React.FC<FileTransferProps> = ({
   showToast,
   companionDeck,
 }) => {
-  const getPin = () => {
-    try {
-      return localStorage.getItem('airbridge_office_pin') || '';
-    } catch (e) {
-      return '';
-    }
-  };
   const [allFiles, setAllFiles] = useState<FileItemWithFolder[]>(() => {
     try {
       const cached = localStorage.getItem('airbridge_cached_files');
@@ -74,9 +68,7 @@ export const FileTransfer: React.FC<FileTransferProps> = ({
 
   const fetchFiles = async () => {
     try {
-      const pin = getPin();
-      const headers: Record<string, string> = {};
-      if (pin) headers['x-airbridge-pin'] = pin;
+      const headers = getAuthHeaders();
       const res = await fetch('/api/files', { headers });
       if (res.ok) {
         const data = await res.json();
@@ -114,9 +106,7 @@ export const FileTransfer: React.FC<FileTransferProps> = ({
 
   const executeDelete = async (filename: string) => {
     try {
-      const pin = getPin();
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      if (pin) headers['x-airbridge-pin'] = pin;
+      const headers = getAuthHeaders({ 'Content-Type': 'application/json' });
 
       // 1. Try POST /api/files/delete with JSON body (handles spaces and special characters reliably)
       let res = await fetch('/api/files/delete', {
@@ -178,9 +168,7 @@ export const FileTransfer: React.FC<FileTransferProps> = ({
     setIsBulkDeleting(true);
     const toDelete = Array.from(selectedFiles);
     try {
-      const pin = getPin();
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      if (pin) headers['x-airbridge-pin'] = pin;
+      const headers = getAuthHeaders({ 'Content-Type': 'application/json' });
 
       const res = await fetch('/api/files/bulk-delete', {
         method: 'POST',
@@ -207,9 +195,7 @@ export const FileTransfer: React.FC<FileTransferProps> = ({
 
   const handleOpenInFinder = async (filename?: string) => {
     try {
-      const pin = getPin();
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      if (pin) headers['x-airbridge-pin'] = pin;
+      const headers = getAuthHeaders({ 'Content-Type': 'application/json' });
 
       const res = await fetch('/api/open-in-finder', {
         method: 'POST',

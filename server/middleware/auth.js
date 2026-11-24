@@ -40,6 +40,13 @@ function isLoopbackAddress(ip) {
  * Validates whether the request originated from the local host machine.
  */
 function isHostRequest(req, requireToken = false) {
+  if (req.headers && req.headers['x-airbridge-simulated-peer']) {
+    return false;
+  }
+  if (req.query && req.query.simulatePeer === '1') {
+    return false;
+  }
+
   const remoteIp = getNormalizedRemoteAddress(req);
   if (!isLoopbackAddress(remoteIp)) {
     return false;
