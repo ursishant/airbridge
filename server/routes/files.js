@@ -96,8 +96,6 @@ function createFilesRouter(options) {
       return res.status(400).json({ error: 'No files uploaded' });
     }
 
-    const state = stateStore.getState();
-
     let targetRecipients = null;
     let maxDownloads = null;
     let expiresMinutes = null;
@@ -906,7 +904,6 @@ function createFilesRouter(options) {
       return res.status(400).json({ error: 'Array of filenames is required' });
     }
 
-    const state = stateStore.getState();
     const deleted = [];
     const errors = [];
 

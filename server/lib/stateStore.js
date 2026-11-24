@@ -57,22 +57,12 @@ class StateStore {
 
   getTargetedFile(filename) {
     if (!filename || typeof filename !== 'string') return null;
-    if (this.targetedFiles.has(filename)) {
-      return this.targetedFiles.get(filename);
-    }
-    if (this.state && this.state.targetedFiles && typeof this.state.targetedFiles === 'object') {
-      return this.state.targetedFiles[filename] || null;
-    }
-    return null;
+    return this.targetedFiles.get(filename) || null;
   }
 
   removeTargetedFile(filename) {
     if (!filename || typeof filename !== 'string') return false;
-    const deleted = this.targetedFiles.delete(filename);
-    if (this.state && this.state.targetedFiles && typeof this.state.targetedFiles === 'object') {
-      delete this.state.targetedFiles[filename];
-    }
-    return deleted;
+    return this.targetedFiles.delete(filename);
   }
 
   init() {

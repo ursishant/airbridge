@@ -23,7 +23,6 @@ const {
   isHostRequest,
   createCorsOriginValidator,
   createRequireOfficeAuth,
-  parseCookies,
   getCookie,
   verifySessionToken,
 } = require('./middleware/auth');

@@ -269,21 +269,14 @@ function extractVerifiedSession(req) {
   if (!req || !req.headers) return null;
 
   // 1. From signed session cookie
-  const sessionToken = getCookie(req.headers.cookie, 'airbridge_session');
-  if (sessionToken) {
-    const verified = verifySessionToken(sessionToken);
-    if (verified) return verified;
-  }
+  const cookieSession = verifySessionToken(getCookie(req.headers.cookie, 'airbridge_session'));
+  if (cookieSession) return cookieSession;
 
   // 2. From Bearer authorization header
-  const authHeader = req.headers.authorization;
-  if (typeof authHeader === 'string') {
-    const match = /^Bearer\s+(\S+)$/i.exec(authHeader.trim());
-    if (match) {
-      const verified = verifySessionToken(match[1]);
-      if (verified) return verified;
-    }
-  }
+  const authHeader = typeof req.headers.authorization === 'string' ? req.headers.authorization : '';
+  const token = authHeader.replace(/^Bearer\s+/i, '').trim();
+  const bearerSession = verifySessionToken(token);
+  if (bearerSession) return bearerSession;
 
   return null;
 }
