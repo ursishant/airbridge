@@ -36,9 +36,7 @@ describe('Bulk Delete Integration Tests', () => {
       fs.writeFileSync(nestedFile, 'nested content');
 
       // Add to targetedFiles state
-      const state = stateStore.getState();
-      if (!state.targetedFiles) state.targetedFiles = {};
-      state.targetedFiles['bulk_test_a.txt'] = ['device_1'];
+      stateStore.setTargetedFile('bulk_test_a.txt', { recipientIds: ['device_1'] });
 
       // 3. Test path traversal safety alongside valid files
       const traversalRes = await fetch(`${baseUrl}/api/files/bulk-delete`, {
@@ -54,7 +52,7 @@ describe('Bulk Delete Integration Tests', () => {
       assert.ok(traversalData.deleted.includes('bulk_test_a.txt'));
       assert.ok(traversalData.errors.some((e) => e.filename.includes('outside_secret.txt')));
       assert.equal(fs.existsSync(file1), false);
-      assert.equal(state.targetedFiles['bulk_test_a.txt'], undefined);
+      assert.equal(stateStore.getTargetedFile('bulk_test_a.txt'), null);
 
       // 4. Test deleting remaining file and folder via DELETE /api/files/bulk-delete
       const batchRes = await fetch(`${baseUrl}/api/files/bulk-delete`, {

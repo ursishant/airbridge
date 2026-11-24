@@ -109,12 +109,12 @@ describe('Office Isolation & Targeted Group Sharing Security Tests', () => {
       assert.ok(approvedData.token);
 
       // 4. Targeted file security: upload file targeted only to dev_colleague_1
-      state.targetedFiles['secret-report.pdf'] = {
+      stateStore.setTargetedFile('secret-report.pdf', {
         recipientIds: ['dev_colleague_1'],
         maxDownloads: 2,
         downloadCount: 0,
         expiresAt: Date.now() + 60000,
-      };
+      });
 
       // Query files from unapproved recipient (dev_stranger_on_wifi)
       const listStrangerRes = await fetch(`${baseUrl}/api/files`, {
@@ -138,7 +138,7 @@ describe('Office Isolation & Targeted Group Sharing Security Tests', () => {
       state.officeSecurity.requireApproval = false;
       state.approvedDevices = [];
       state.pendingApprovalRequests = [];
-      state.targetedFiles = {};
+      stateStore.removeTargetedFile('secret-report.pdf');
     } finally {
       await new Promise((resolve) => testServer.close(resolve));
     }

@@ -24,6 +24,7 @@ const {
   createCorsOriginValidator,
   createRequireOfficeAuth,
   parseCookies,
+  getCookie,
   verifySessionToken,
 } = require('./middleware/auth');
 
@@ -405,8 +406,7 @@ server.on('upgrade', (req, socket, head) => {
     let isAuthed = isHost;
 
     if (!isAuthed) {
-      const cookies = parseCookies(req.headers.cookie);
-      const sessionCookie = cookies['airbridge_session'];
+      const sessionCookie = getCookie(req.headers.cookie, 'airbridge_session');
       if (sessionCookie && verifySessionToken(sessionCookie)) {
         isAuthed = true;
       }
@@ -484,8 +484,8 @@ wss.on('connection', (ws, req) => {
   let isAuthenticated = !state.officeSecurity?.enabled || isHostClient;
 
   if (!isAuthenticated) {
-    const cookies = parseCookies(req.headers.cookie);
-    if (cookies['airbridge_session'] && verifySessionToken(cookies['airbridge_session'])) {
+    const sessionCookie = getCookie(req.headers.cookie, 'airbridge_session');
+    if (sessionCookie && verifySessionToken(sessionCookie)) {
       isAuthenticated = true;
     }
   }

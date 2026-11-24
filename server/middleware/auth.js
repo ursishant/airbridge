@@ -123,23 +123,48 @@ function createCorsOriginValidator(serverPort) {
 }
 
 /**
- * Parses cookies from header string
+ * Parses cookies from header string into a safe Map (immune to property injection)
  */
 function parseCookies(header) {
-  const list = Object.create(null);
-  if (!header || typeof header !== 'string') return list;
+  const map = new Map();
+  if (!header || typeof header !== 'string') return map;
   header.split(';').forEach((cookie) => {
     const parts = cookie.split('=');
     const name = parts[0]?.trim();
-    if (name && name !== '__proto__' && name !== 'constructor' && name !== 'prototype') {
+    if (name) {
+      const val = parts.slice(1).join('=').trim();
       try {
-        list[name] = decodeURIComponent(parts.slice(1).join('=').trim());
+        map.set(name, decodeURIComponent(val));
       } catch (_) {
-        list[name] = parts.slice(1).join('=').trim();
+        map.set(name, val);
       }
     }
   });
-  return list;
+  return map;
+}
+
+/**
+ * Extracts a single cookie by name without object allocation or property access
+ */
+function getCookie(header, targetName) {
+  if (typeof header !== 'string' || !targetName) return null;
+  const pairs = header.split(';');
+  for (let i = 0; i < pairs.length; i++) {
+    const pair = pairs[i].trim();
+    const eqIdx = pair.indexOf('=');
+    if (eqIdx !== -1) {
+      const name = pair.slice(0, eqIdx).trim();
+      if (name === targetName) {
+        const val = pair.slice(eqIdx + 1).trim();
+        try {
+          return decodeURIComponent(val);
+        } catch (_) {
+          return val;
+        }
+      }
+    }
+  }
+  return null;
 }
 
 /**
@@ -244,27 +269,19 @@ function extractVerifiedSession(req) {
   if (!req || !req.headers) return null;
 
   // 1. From signed session cookie
-  const cookieHeader = req.headers.cookie;
-  if (typeof cookieHeader === 'string' && cookieHeader.length > 0) {
-    const cookies = parseCookies(cookieHeader);
-    const sessionToken = cookies['airbridge_session'];
-    if (typeof sessionToken === 'string' && sessionToken.length > 0) {
-      const verified = verifySessionToken(sessionToken);
-      if (verified && typeof verified === 'object') {
-        return verified;
-      }
-    }
+  const sessionToken = getCookie(req.headers.cookie, 'airbridge_session');
+  if (sessionToken) {
+    const verified = verifySessionToken(sessionToken);
+    if (verified) return verified;
   }
 
   // 2. From Bearer authorization header
   const authHeader = req.headers.authorization;
-  if (typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) {
-    const bearerToken = authHeader.slice(7).trim();
-    if (bearerToken.length > 0) {
-      const verified = verifySessionToken(bearerToken);
-      if (verified && typeof verified === 'object') {
-        return verified;
-      }
+  if (typeof authHeader === 'string') {
+    const match = /^Bearer\s+(\S+)$/i.exec(authHeader.trim());
+    if (match) {
+      const verified = verifySessionToken(match[1]);
+      if (verified) return verified;
     }
   }
 
@@ -387,6 +404,7 @@ module.exports = {
   getHostAddresses,
   createCorsOriginValidator,
   parseCookies,
+  getCookie,
   signSessionToken,
   verifySessionToken,
   issueSession,

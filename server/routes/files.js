@@ -20,15 +20,6 @@ function createFilesRouter(options) {
     stateStore,
   } = options;
 
-  function isSafePropertyKey(key) {
-    if (!key || typeof key !== 'string') return false;
-    const trimmed = key.trim();
-    if (!trimmed || trimmed === '__proto__' || trimmed === 'constructor' || trimmed === 'prototype') {
-      return false;
-    }
-    return true;
-  }
-
   let cachedFilesList = null;
   let lastFilesListTime = 0;
 
@@ -53,7 +44,7 @@ function createFilesRouter(options) {
             totalBytes += st.size;
           }
         }
-      } catch (e) {}
+      } catch (e) { }
     }
     recurse(dirPath);
     return { count, totalBytes };
@@ -71,10 +62,7 @@ function createFilesRouter(options) {
       return { permitted: true };
     }
 
-    const state = stateStore.getState();
-    const targetInfo = (state.targetedFiles && isSafePropertyKey(filename) && Object.prototype.hasOwnProperty.call(state.targetedFiles, filename))
-      ? state.targetedFiles[filename]
-      : null;
+    const targetInfo = stateStore.getTargetedFile ? stateStore.getTargetedFile(filename) : null;
     if (!targetInfo) {
       // Normal untargeted file: visible to anyone authorized in room
       return { permitted: true };
@@ -109,7 +97,6 @@ function createFilesRouter(options) {
     }
 
     const state = stateStore.getState();
-    if (!state.targetedFiles) state.targetedFiles = {};
 
     let targetRecipients = null;
     let maxDownloads = null;
@@ -121,7 +108,7 @@ function createFilesRouter(options) {
         if (Array.isArray(parsed) && parsed.length > 0) {
           targetRecipients = parsed.map(String);
         }
-      } catch (_) {}
+      } catch (_) { }
     }
 
     if (req.body && req.body.maxDownloads) {
@@ -140,17 +127,12 @@ function createFilesRouter(options) {
       const topFolder = isInsideFolder ? relFromUploads.split('/')[0] : null;
 
       if (targetRecipients || maxDownloads || expiresMinutes) {
-        if (isSafePropertyKey(file.filename)) {
-          Object.defineProperty(state.targetedFiles, file.filename, {
-            value: {
-              recipientIds: targetRecipients || [],
-              maxDownloads: maxDownloads || null,
-              downloadCount: 0,
-              expiresAt: expiresMinutes ? Date.now() + expiresMinutes * 60 * 1000 : null,
-            },
-            writable: true,
-            enumerable: true,
-            configurable: true,
+        if (stateStore.setTargetedFile) {
+          stateStore.setTargetedFile(file.filename, {
+            recipientIds: targetRecipients || [],
+            maxDownloads: maxDownloads || null,
+            downloadCount: 0,
+            expiresAt: expiresMinutes ? Date.now() + expiresMinutes * 60 * 1000 : null,
           });
         }
       }
@@ -190,7 +172,7 @@ function createFilesRouter(options) {
 
     const cleanupChunk = () => {
       if (isChunkValid && fs.existsSync(safeChunkPath)) {
-        try { fs.unlinkSync(safeChunkPath); } catch (e) {}
+        try { fs.unlinkSync(safeChunkPath); } catch (e) { }
       }
     };
 
@@ -243,7 +225,7 @@ function createFilesRouter(options) {
       }
 
       if (cIndex === 0 && fs.existsSync(resolvedTempPath)) {
-        try { fs.unlinkSync(resolvedTempPath); } catch (e) {}
+        try { fs.unlinkSync(resolvedTempPath); } catch (e) { }
       }
 
       if (isChunkValid) {
@@ -273,7 +255,7 @@ function createFilesRouter(options) {
         if (expectedSha256 && typeof expectedSha256 === 'string') {
           const actualSha256 = await computeFileSha256(finalDest);
           if (actualSha256.toLowerCase() !== expectedSha256.trim().toLowerCase()) {
-            try { fs.unlinkSync(finalDest); } catch (_) {}
+            try { fs.unlinkSync(finalDest); } catch (_) { }
             return res.status(400).json({ error: 'Checksum mismatch: file corrupted in transit' });
           }
         }
@@ -323,8 +305,8 @@ function createFilesRouter(options) {
     const now = Date.now();
     for (const [id, t] of activeTransfers.entries()) {
       if (now - t.lastActivity > 10 * 60 * 1000) {
-        try { if (t.fd) fs.closeSync(t.fd); } catch (e) {}
-        try { if (fs.existsSync(t.partPath)) fs.unlinkSync(t.partPath); } catch (e) {}
+        try { if (t.fd) fs.closeSync(t.fd); } catch (e) { }
+        try { if (fs.existsSync(t.partPath)) fs.unlinkSync(t.partPath); } catch (e) { }
         activeTransfers.delete(id);
       }
     }
@@ -338,7 +320,7 @@ function createFilesRouter(options) {
 
     const cleanupTempChunk = () => {
       if (isChunkValid && fs.existsSync(safeChunkPath)) {
-        try { fs.unlinkSync(safeChunkPath); } catch (e) {}
+        try { fs.unlinkSync(safeChunkPath); } catch (e) { }
       }
     };
 
@@ -444,7 +426,7 @@ function createFilesRouter(options) {
             const base = path.basename(transfer.baseName, ext);
             finalDest = path.join(transfer.targetDir, `${base}_${Date.now()}${ext}`);
           } else {
-            try { fs.unlinkSync(finalDest); } catch (e) {}
+            try { fs.unlinkSync(finalDest); } catch (e) { }
           }
         }
 
@@ -453,7 +435,7 @@ function createFilesRouter(options) {
         if (transfer.expectedSha256) {
           const actualSha256 = await computeFileSha256(finalDest);
           if (actualSha256.toLowerCase() !== transfer.expectedSha256.toLowerCase()) {
-            try { fs.unlinkSync(finalDest); } catch (_) {}
+            try { fs.unlinkSync(finalDest); } catch (_) { }
             return res.status(400).json({ error: 'Checksum mismatch: file corrupted in transit' });
           }
         }
@@ -519,7 +501,7 @@ function createFilesRouter(options) {
 
       if (isMac) {
         execFile('afplay', ['/System/Library/Components/CoreAudio.component/Contents/SharedSupport/SystemSounds/system/payment_success.caf'], (err) => {
-          if (err) execFile('afplay', ['/System/Library/Sounds/Ping.aiff'], () => {});
+          if (err) execFile('afplay', ['/System/Library/Sounds/Ping.aiff'], () => { });
         });
       }
 
@@ -584,7 +566,7 @@ function createFilesRouter(options) {
               path: `/api/files/${encodeURIComponent(item)}`,
             });
           }
-        } catch (e) {}
+        } catch (e) { }
       }
 
       files.sort((a, b) => b.modifiedAt - a.modifiedAt);
@@ -801,7 +783,7 @@ function createFilesRouter(options) {
 
       req.on('close', () => {
         if (!zipProcess.killed) {
-          try { zipProcess.kill('SIGTERM'); } catch (e) {}
+          try { zipProcess.kill('SIGTERM'); } catch (e) { }
         }
       });
 
@@ -841,7 +823,7 @@ function createFilesRouter(options) {
 
       req.on('close', () => {
         if (!zipProcess.killed) {
-          try { zipProcess.kill('SIGTERM'); } catch (e) {}
+          try { zipProcess.kill('SIGTERM'); } catch (e) { }
         }
       });
 
@@ -904,9 +886,8 @@ function createFilesRouter(options) {
       const deleted = deleteFileOrDirectory(filename);
       if (deleted) {
         invalidateCache();
-        const state = stateStore.getState();
-        if (state.targetedFiles && isSafePropertyKey(filename) && Object.prototype.hasOwnProperty.call(state.targetedFiles, filename)) {
-          delete state.targetedFiles[filename];
+        if (stateStore.removeTargetedFile) {
+          stateStore.removeTargetedFile(filename);
           stateStore.save();
         }
         broadcast({ type: 'file_deleted', filename });
@@ -936,8 +917,8 @@ function createFilesRouter(options) {
         if (ok) {
           deleted.push(name.trim());
           const safeName = name.trim();
-          if (state.targetedFiles && isSafePropertyKey(safeName) && Object.prototype.hasOwnProperty.call(state.targetedFiles, safeName)) {
-            delete state.targetedFiles[safeName];
+          if (stateStore.removeTargetedFile) {
+            stateStore.removeTargetedFile(safeName);
           }
           broadcast({ type: 'file_deleted', filename: name.trim() });
         } else {

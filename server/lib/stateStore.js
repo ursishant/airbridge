@@ -43,11 +43,36 @@ class StateStore {
       },
       approvedDevices: [], // Array of approved device IDs: ['dev_xxx', ...]
       pendingApprovalRequests: [], // Array of pending requests: [{ id, name, ip, os, requestedAt }]
-      targetedFiles: Object.create(null), // Maps filename -> { recipientIds: string[], maxDownloads?: number, downloadCount: number, expiresAt?: number }
     };
 
+    this.targetedFiles = new Map(); // Immune to prototype pollution / remote property injection
     this.writeQueue = Promise.resolve();
     this.init();
+  }
+
+  setTargetedFile(filename, meta) {
+    if (!filename || typeof filename !== 'string') return;
+    this.targetedFiles.set(filename, meta);
+  }
+
+  getTargetedFile(filename) {
+    if (!filename || typeof filename !== 'string') return null;
+    if (this.targetedFiles.has(filename)) {
+      return this.targetedFiles.get(filename);
+    }
+    if (this.state && this.state.targetedFiles && typeof this.state.targetedFiles === 'object') {
+      return this.state.targetedFiles[filename] || null;
+    }
+    return null;
+  }
+
+  removeTargetedFile(filename) {
+    if (!filename || typeof filename !== 'string') return false;
+    const deleted = this.targetedFiles.delete(filename);
+    if (this.state && this.state.targetedFiles && typeof this.state.targetedFiles === 'object') {
+      delete this.state.targetedFiles[filename];
+    }
+    return deleted;
   }
 
   init() {
@@ -84,13 +109,10 @@ class StateStore {
       if (Array.isArray(parsed.clipboardHistory)) this.state.clipboardHistory = parsed.clipboardHistory;
       if (Array.isArray(parsed.knownDevices)) this.state.knownDevices = parsed.knownDevices;
       if (Array.isArray(parsed.approvedDevices)) this.state.approvedDevices = parsed.approvedDevices;
-      if (parsed.targetedFiles && typeof parsed.targetedFiles === 'object') {
-        this.state.targetedFiles = Object.create(null);
-        for (const [k, v] of Object.entries(parsed.targetedFiles)) {
-          if (k !== '__proto__' && k !== 'constructor' && k !== 'prototype') {
-            this.state.targetedFiles[k] = v;
-          }
-        }
+      if (Array.isArray(parsed.targetedFiles)) {
+        this.targetedFiles = new Map(parsed.targetedFiles);
+      } else if (parsed.targetedFiles && typeof parsed.targetedFiles === 'object') {
+        this.targetedFiles = new Map(Object.entries(parsed.targetedFiles));
       }
       if (parsed.officeSecurity && typeof parsed.officeSecurity === 'object') {
         this.state.officeSecurity.enabled = Boolean(parsed.officeSecurity.enabled);
@@ -126,7 +148,7 @@ class StateStore {
           clipboardHistory: Array.isArray(this.state.clipboardHistory) ? this.state.clipboardHistory : [],
           knownDevices: Array.isArray(this.state.knownDevices) ? this.state.knownDevices : [],
           approvedDevices: Array.isArray(this.state.approvedDevices) ? this.state.approvedDevices : [],
-          targetedFiles: this.state.targetedFiles || {},
+          targetedFiles: Array.from(this.targetedFiles.entries()),
           officeSecurity: {
             enabled: Boolean(this.state.officeSecurity?.enabled),
             pin: String(this.state.officeSecurity?.pin || ''),
