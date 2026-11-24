@@ -45,14 +45,6 @@ function createInfoRouter(options) {
       state.pendingApprovalRequests = pendingRequests;
     }
 
-    if (isHost) {
-      res.cookie('airbridge_host_token', BOOT_HOST_SECRET, {
-        httpOnly: false,
-        sameSite: 'strict',
-        maxAge: 7 * 24 * 60 * 60 * 1000,
-      });
-    }
-
     res.json({
       primaryIp: net.primaryIp,
       allIps: net.allIps,

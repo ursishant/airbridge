@@ -7,7 +7,8 @@ const { cleanupAbandonedChunks, computeFileSha256 } = require('../lib/chunkReape
 
 describe('Chunk Reaper & File Checksum Verification', () => {
   it('computes accurate SHA-256 checksum for binary contents', async () => {
-    const tempFile = path.join(os.tmpdir(), `airbridge_sha_${Date.now()}.bin`);
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'airbridge-sha-'));
+    const tempFile = path.join(tempDir, 'payload.bin');
     fs.writeFileSync(tempFile, 'Hello AirBridge Secure Transfer!');
 
     const hash = await computeFileSha256(tempFile);
@@ -15,7 +16,9 @@ describe('Chunk Reaper & File Checksum Verification', () => {
     assert.equal(typeof hash, 'string');
     assert.equal(hash.length, 64);
 
-    fs.unlinkSync(tempFile);
+    try {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    } catch (_) {}
   });
 
   it('cleans up abandoned chunks older than TTL while keeping recent ones', () => {

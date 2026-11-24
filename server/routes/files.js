@@ -17,9 +17,17 @@ function createFilesRouter(options) {
     broadcast,
     isMac,
     isWindows,
-    isLinux,
     stateStore,
   } = options;
+
+  function isSafePropertyKey(key) {
+    if (!key || typeof key !== 'string') return false;
+    const trimmed = key.trim();
+    if (!trimmed || trimmed === '__proto__' || trimmed === 'constructor' || trimmed === 'prototype') {
+      return false;
+    }
+    return true;
+  }
 
   let cachedFilesList = null;
   let lastFilesListTime = 0;
@@ -64,7 +72,9 @@ function createFilesRouter(options) {
     }
 
     const state = stateStore.getState();
-    const targetInfo = (state.targetedFiles || {})[filename];
+    const targetInfo = (state.targetedFiles && isSafePropertyKey(filename) && Object.prototype.hasOwnProperty.call(state.targetedFiles, filename))
+      ? state.targetedFiles[filename]
+      : null;
     if (!targetInfo) {
       // Normal untargeted file: visible to anyone authorized in room
       return { permitted: true };
@@ -130,12 +140,19 @@ function createFilesRouter(options) {
       const topFolder = isInsideFolder ? relFromUploads.split('/')[0] : null;
 
       if (targetRecipients || maxDownloads || expiresMinutes) {
-        state.targetedFiles[file.filename] = {
-          recipientIds: targetRecipients || [],
-          maxDownloads: maxDownloads || null,
-          downloadCount: 0,
-          expiresAt: expiresMinutes ? Date.now() + expiresMinutes * 60 * 1000 : null,
-        };
+        if (isSafePropertyKey(file.filename)) {
+          Object.defineProperty(state.targetedFiles, file.filename, {
+            value: {
+              recipientIds: targetRecipients || [],
+              maxDownloads: maxDownloads || null,
+              downloadCount: 0,
+              expiresAt: expiresMinutes ? Date.now() + expiresMinutes * 60 * 1000 : null,
+            },
+            writable: true,
+            enumerable: true,
+            configurable: true,
+          });
+        }
       }
 
       return {
@@ -186,7 +203,6 @@ function createFilesRouter(options) {
         relativePath,
         sender,
         expectedSha256,
-        recipients,
       } = req.body;
 
       if (!req.file || !fileId || chunkIndex === undefined || totalChunks === undefined || !filename) {
@@ -889,7 +905,7 @@ function createFilesRouter(options) {
       if (deleted) {
         invalidateCache();
         const state = stateStore.getState();
-        if (state.targetedFiles && state.targetedFiles[filename]) {
+        if (state.targetedFiles && isSafePropertyKey(filename) && Object.prototype.hasOwnProperty.call(state.targetedFiles, filename)) {
           delete state.targetedFiles[filename];
           stateStore.save();
         }
@@ -919,8 +935,9 @@ function createFilesRouter(options) {
         const ok = deleteFileOrDirectory(name.trim());
         if (ok) {
           deleted.push(name.trim());
-          if (state.targetedFiles && state.targetedFiles[name.trim()]) {
-            delete state.targetedFiles[name.trim()];
+          const safeName = name.trim();
+          if (state.targetedFiles && isSafePropertyKey(safeName) && Object.prototype.hasOwnProperty.call(state.targetedFiles, safeName)) {
+            delete state.targetedFiles[safeName];
           }
           broadcast({ type: 'file_deleted', filename: name.trim() });
         } else {

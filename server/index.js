@@ -478,9 +478,7 @@ wss.on('connection', (ws, req) => {
   const clientName = queryName || defaultClientName;
   const ip = req.socket.remoteAddress ? req.socket.remoteAddress.replace(/^.*:/, '') : 'local';
 
-  const cookies = parseCookies(req.headers.cookie);
   const isHostClient = (queryHostToken && queryHostToken === BOOT_HOST_SECRET) ||
-    (cookies['airbridge_host_token'] && cookies['airbridge_host_token'] === BOOT_HOST_SECRET) ||
     isHostRequest(req);
   const state = stateStore.getState();
   let isAuthenticated = !state.officeSecurity?.enabled || isHostClient;

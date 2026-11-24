@@ -43,7 +43,7 @@ class StateStore {
       },
       approvedDevices: [], // Array of approved device IDs: ['dev_xxx', ...]
       pendingApprovalRequests: [], // Array of pending requests: [{ id, name, ip, os, requestedAt }]
-      targetedFiles: {}, // Maps filename -> { recipientIds: string[], maxDownloads?: number, downloadCount: number, expiresAt?: number }
+      targetedFiles: Object.create(null), // Maps filename -> { recipientIds: string[], maxDownloads?: number, downloadCount: number, expiresAt?: number }
     };
 
     this.writeQueue = Promise.resolve();
@@ -60,44 +60,49 @@ class StateStore {
     }
 
     // One-time automatic migration from legacy uploads directory if present
-    if (this.legacyUploadsDir && !fs.existsSync(this.stateFilePath)) {
+    if (this.legacyUploadsDir) {
       const legacyPath = path.join(this.legacyUploadsDir, '.airbridge_state.json');
-      if (fs.existsSync(legacyPath)) {
+      try {
+        const rawLegacy = fs.readFileSync(legacyPath, 'utf8');
+        fs.writeFileSync(this.stateFilePath, rawLegacy, { mode: 0o600, flag: 'wx' });
         try {
-          const rawLegacy = fs.readFileSync(legacyPath, 'utf8');
-          fs.writeFileSync(this.stateFilePath, rawLegacy, { mode: 0o600 });
-          try {
-            fs.unlinkSync(legacyPath);
-          } catch (_) {}
-          console.log('[StateStore] Migrated legacy state file from uploads directory to:', this.stateFilePath);
-        } catch (err) {
+          fs.unlinkSync(legacyPath);
+        } catch (_) {}
+        console.log('[StateStore] Migrated legacy state file from uploads directory to:', this.stateFilePath);
+      } catch (err) {
+        if (err.code !== 'ENOENT' && err.code !== 'EEXIST') {
           console.warn('[StateStore] Failed to migrate legacy state:', err.message);
         }
       }
     }
 
     // Load state from file
-    if (fs.existsSync(this.stateFilePath)) {
-      try {
-        const raw = fs.readFileSync(this.stateFilePath, 'utf8');
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed.chatHistory)) this.state.chatHistory = parsed.chatHistory;
-        if (Array.isArray(parsed.clipboardHistory)) this.state.clipboardHistory = parsed.clipboardHistory;
-        if (Array.isArray(parsed.knownDevices)) this.state.knownDevices = parsed.knownDevices;
-        if (Array.isArray(parsed.approvedDevices)) this.state.approvedDevices = parsed.approvedDevices;
-        if (parsed.targetedFiles && typeof parsed.targetedFiles === 'object') {
-          this.state.targetedFiles = parsed.targetedFiles;
-        }
-        if (parsed.officeSecurity && typeof parsed.officeSecurity === 'object') {
-          this.state.officeSecurity.enabled = Boolean(parsed.officeSecurity.enabled);
-          if (parsed.officeSecurity.pin) {
-            this.state.officeSecurity.pin = String(parsed.officeSecurity.pin);
+    try {
+      const raw = fs.readFileSync(this.stateFilePath, 'utf8');
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed.chatHistory)) this.state.chatHistory = parsed.chatHistory;
+      if (Array.isArray(parsed.clipboardHistory)) this.state.clipboardHistory = parsed.clipboardHistory;
+      if (Array.isArray(parsed.knownDevices)) this.state.knownDevices = parsed.knownDevices;
+      if (Array.isArray(parsed.approvedDevices)) this.state.approvedDevices = parsed.approvedDevices;
+      if (parsed.targetedFiles && typeof parsed.targetedFiles === 'object') {
+        this.state.targetedFiles = Object.create(null);
+        for (const [k, v] of Object.entries(parsed.targetedFiles)) {
+          if (k !== '__proto__' && k !== 'constructor' && k !== 'prototype') {
+            this.state.targetedFiles[k] = v;
           }
-          this.state.officeSecurity.requireApproval = Boolean(parsed.officeSecurity.requireApproval);
         }
-        console.log(`[StateStore] Loaded state: ${this.state.chatHistory.length} chats, ${this.state.clipboardHistory.length} clipboard items, ${this.state.approvedDevices.length} approved devices.`);
-      } catch (err) {
-        console.error('[StateStore] Error reading state file, starting fresh:', err.message);
+      }
+      if (parsed.officeSecurity && typeof parsed.officeSecurity === 'object') {
+        this.state.officeSecurity.enabled = Boolean(parsed.officeSecurity.enabled);
+        if (parsed.officeSecurity.pin) {
+          this.state.officeSecurity.pin = String(parsed.officeSecurity.pin);
+        }
+        this.state.officeSecurity.requireApproval = Boolean(parsed.officeSecurity.requireApproval);
+      }
+      console.log(`[StateStore] Loaded state: ${this.state.chatHistory.length} chats, ${this.state.clipboardHistory.length} clipboard items, ${this.state.approvedDevices.length} approved devices.`);
+    } catch (err) {
+      if (err.code !== 'ENOENT') {
+        console.warn('[StateStore] Error reading state file, starting fresh:', err.message);
       }
     }
   }

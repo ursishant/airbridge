@@ -16,28 +16,10 @@
 
 <br />
 
-<!-- 3-Step Zero-Install Flow Strip -->
-<table align="center" width="100%">
-  <tr>
-    <td align="center" width="31%" style="padding: 16px 12px;">
-      <div style="font-size: 26px; margin-bottom: 6px;">💻</div>
-      <b>1. Start on Your Laptop</b><br/>
-      <sub>Run AirBridge on Windows, Mac, or Linux.<br/><b>Only your computer needs an install.</b></sub>
-    </td>
-    <td align="center" width="5%" style="font-size: 20px; color: #0071E3;">➔</td>
-    <td align="center" width="31%" style="padding: 16px 12px;">
-      <div style="font-size: 26px; margin-bottom: 6px;">📱</div>
-      <b>2. Scan QR on Your Phone</b><br/>
-      <sub>Point your iPhone or Android camera at the QR code.<br/><b>Zero apps to download or install.</b></sub>
-    </td>
-    <td align="center" width="5%" style="font-size: 20px; color: #10B981;">➔</td>
-    <td align="center" width="31%" style="padding: 16px 12px;">
-      <div style="font-size: 26px; margin-bottom: 6px;">⚡</div>
-      <b>3. Beam & Sync Instantly</b><br/>
-      <sub>Send large files, folders, and sync clipboard.<br/>Direct gigabit local Wi-Fi speed (50–100+ MB/s).</sub>
-    </td>
-  </tr>
-</table>
+<!-- Zero-Install Setup Flow Pipeline -->
+<div align="center">
+  <img src="docs/screenshots/quickstart-steps.svg" alt="AirBridge Zero-Install Setup Pipeline: 01 Start on Laptop -> 02 Scan QR on Phone -> 03 Beam & Sync Instantly" width="100%" />
+</div>
 
 <br />
 

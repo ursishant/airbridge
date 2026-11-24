@@ -42,7 +42,7 @@ function isLoopbackAddress(ip) {
 function isHostAddress(ip) {
   if (!ip) return false;
   if (isLoopbackAddress(ip)) return true;
-  const clean = (ip || '').toLowerCase().replace(/^::ffff:/, '');
+  const clean = ip.toLowerCase().replace(/^::ffff:/, '');
   const hostIps = getHostAddresses();
   return hostIps.has(clean);
 }
@@ -58,12 +58,12 @@ function isHostRequest(req, requireToken = false) {
     return false;
   }
 
-  const cookies = parseCookies(req.headers ? req.headers.cookie : undefined);
   const token = (req.headers && req.headers['x-airbridge-host-token']) ||
-    cookies['airbridge_host_token'] ||
     (req.query && req.query.hostToken);
 
-  if (token && token === BOOT_HOST_SECRET) {
+  if (typeof token === 'string' &&
+      token.length === BOOT_HOST_SECRET.length &&
+      crypto.timingSafeEqual(Buffer.from(token, 'utf8'), Buffer.from(BOOT_HOST_SECRET, 'utf8'))) {
     return true;
   }
 
@@ -126,13 +126,17 @@ function createCorsOriginValidator(serverPort) {
  * Parses cookies from header string
  */
 function parseCookies(header) {
-  const list = {};
-  if (!header) return list;
+  const list = Object.create(null);
+  if (!header || typeof header !== 'string') return list;
   header.split(';').forEach((cookie) => {
     const parts = cookie.split('=');
     const name = parts[0]?.trim();
-    if (name) {
-      list[name] = decodeURIComponent(parts.slice(1).join('=').trim());
+    if (name && name !== '__proto__' && name !== 'constructor' && name !== 'prototype') {
+      try {
+        list[name] = decodeURIComponent(parts.slice(1).join('=').trim());
+      } catch (_) {
+        list[name] = parts.slice(1).join('=').trim();
+      }
     }
   });
   return list;
@@ -152,22 +156,29 @@ function signSessionToken(payload) {
  */
 function verifySessionToken(token) {
   if (!token || typeof token !== 'string') return null;
-  const parts = token.split('.');
-  if (parts.length !== 2) return null;
-  const [raw, sig] = parts;
-  const expected = crypto.createHmac('sha256', SESSION_SECRET).update(raw).digest('base64url');
-  if (crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) {
-    try {
-      const payload = JSON.parse(Buffer.from(raw, 'base64url').toString('utf8'));
-      if (payload.exp && Date.now() > payload.exp) {
-        return null;
-      }
-      return payload;
-    } catch (_) {
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 2) return null;
+    const [raw, sig] = parts;
+    if (!raw || !sig) return null;
+
+    const expected = crypto.createHmac('sha256', SESSION_SECRET).update(raw).digest('base64url');
+    const sigBuf = Buffer.from(sig, 'utf8');
+    const expectedBuf = Buffer.from(expected, 'utf8');
+
+    if (sigBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(sigBuf, expectedBuf)) {
       return null;
     }
+
+    const payload = JSON.parse(Buffer.from(raw, 'base64url').toString('utf8'));
+    if (!payload || typeof payload !== 'object') return null;
+    if (typeof payload.exp === 'number' && Date.now() > payload.exp) {
+      return null;
+    }
+    return payload;
+  } catch (_) {
+    return null;
   }
-  return null;
 }
 
 /**
@@ -227,25 +238,57 @@ function getPinLockoutInfo(ip) {
 }
 
 /**
- * Extracts requesting client device ID from headers or session
+ * Extracts and cryptographically verifies session token from cookie or authorization header
+ */
+function extractVerifiedSession(req) {
+  if (!req || !req.headers) return null;
+
+  // 1. From signed session cookie
+  const cookieHeader = req.headers.cookie;
+  if (typeof cookieHeader === 'string' && cookieHeader.length > 0) {
+    const cookies = parseCookies(cookieHeader);
+    const sessionToken = cookies['airbridge_session'];
+    if (typeof sessionToken === 'string' && sessionToken.length > 0) {
+      const verified = verifySessionToken(sessionToken);
+      if (verified && typeof verified === 'object') {
+        return verified;
+      }
+    }
+  }
+
+  // 2. From Bearer authorization header
+  const authHeader = req.headers.authorization;
+  if (typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) {
+    const bearerToken = authHeader.slice(7).trim();
+    if (bearerToken.length > 0) {
+      const verified = verifySessionToken(bearerToken);
+      if (verified && typeof verified === 'object') {
+        return verified;
+      }
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Extracts requesting client device ID from verified session or explicit device headers
  */
 function getClientDeviceId(req) {
-  let devId = req.headers['x-airbridge-device-id'] || req.query.deviceId || (req.body && req.body.deviceId);
-  if (devId) return String(devId).trim();
-
-  const cookies = parseCookies(req.headers.cookie);
-  const sessionCookie = cookies['airbridge_session'];
-  if (sessionCookie) {
-    const session = verifySessionToken(sessionCookie);
-    if (session && session.deviceId) return session.deviceId;
+  const session = extractVerifiedSession(req);
+  if (session && session.deviceId) {
+    return String(session.deviceId).trim();
   }
 
-  const authHeader = req.headers.authorization;
-  if (authHeader && authHeader.startsWith('Bearer ')) {
-    const session = verifySessionToken(authHeader.slice(7).trim());
-    if (session && session.deviceId) return session.deviceId;
+  let devId = null;
+  if (req.headers && req.headers['x-airbridge-device-id']) {
+    devId = req.headers['x-airbridge-device-id'];
+  } else if (req.query && req.query.deviceId) {
+    devId = req.query.deviceId;
+  } else if (req.body && req.body.deviceId) {
+    devId = req.body.deviceId;
   }
-  return null;
+  return devId ? String(devId).trim() : null;
 }
 
 /**
@@ -273,34 +316,22 @@ function isAuthorizedRequest(req, state) {
   let isPinAuthed = false;
   let sessionDeviceId = null;
 
-  // Check signed session cookie
-  const cookies = parseCookies(req.headers.cookie);
-  const sessionCookie = cookies['airbridge_session'];
-  if (sessionCookie) {
-    const session = verifySessionToken(sessionCookie);
-    if (session) {
-      isPinAuthed = true;
-      sessionDeviceId = session.deviceId;
-    }
+  // Verify cryptographic session token
+  const verifiedSession = extractVerifiedSession(req);
+  if (verifiedSession && typeof verifiedSession === 'object') {
+    isPinAuthed = true;
+    sessionDeviceId = verifiedSession.deviceId || null;
   }
 
-  // Check Bearer authorization header
+  // Check direct PIN fallback
   if (!isPinAuthed) {
-    const authHeader = req.headers.authorization;
-    if (authHeader && authHeader.startsWith('Bearer ')) {
-      const session = verifySessionToken(authHeader.slice(7).trim());
-      if (session) {
+    const rawPin = (req.headers['x-airbridge-pin'] || req.query.pin || (req.body && req.body.pin) || '');
+    const clientPin = typeof rawPin === 'string' ? rawPin.trim() : String(rawPin).trim();
+    const expectedPin = typeof state.officeSecurity.pin === 'string' ? state.officeSecurity.pin.trim() : '';
+    if (expectedPin.length > 0 && clientPin.length === expectedPin.length) {
+      if (crypto.timingSafeEqual(Buffer.from(clientPin, 'utf8'), Buffer.from(expectedPin, 'utf8'))) {
         isPinAuthed = true;
-        sessionDeviceId = session.deviceId;
       }
-    }
-  }
-
-  // Check direct PIN
-  if (!isPinAuthed) {
-    const clientPin = (req.headers['x-airbridge-pin'] || req.query.pin || (req.body && req.body.pin) || '').toString().trim();
-    if (state.officeSecurity.pin && clientPin === state.officeSecurity.pin) {
-      isPinAuthed = true;
     }
   }
 
