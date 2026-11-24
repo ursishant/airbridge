@@ -211,6 +211,10 @@ function createOfficeRouter(options) {
 
     if (typeof enabled === 'boolean') {
       state.officeSecurity.enabled = enabled;
+      if (!enabled) {
+        state.officeSecurity.requireApproval = false;
+        state.pendingApprovalRequests = [];
+      }
     }
 
     if (typeof requireApproval === 'boolean') {

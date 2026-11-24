@@ -20,11 +20,12 @@ function createInfoRouter(options) {
     const net = getNetworkIps();
     const isHost = isHostRequest(req);
     const state = stateStore.getState();
-    const isAuthed = isHost || isAuthorizedRequest(req, state);
+    const isSecEnabled = Boolean(state.officeSecurity?.enabled);
+    const isAuthed = !isSecEnabled || isHost || isAuthorizedRequest(req, state);
     const devId = getClientDeviceId(req);
 
     const isPendingApproval = Boolean(
-      state.officeSecurity?.enabled &&
+      isSecEnabled &&
       state.officeSecurity?.requireApproval &&
       !isHost &&
       (!devId || !(state.approvedDevices || []).includes(devId))
@@ -52,14 +53,14 @@ function createInfoRouter(options) {
       downloadsDir: getSanitizedDownloadsDir(),
       connectedCount: getUniqueDevices().length,
       officeSecurity: {
-        enabled: Boolean(state.officeSecurity?.enabled),
-        requiresAuth: !isAuthed,
-        requireApproval: Boolean(state.officeSecurity?.requireApproval),
+        enabled: isSecEnabled,
+        requiresAuth: isSecEnabled && !isAuthed,
+        requireApproval: isSecEnabled && Boolean(state.officeSecurity?.requireApproval),
         isPendingApproval,
-        pin: isAuthed ? state.officeSecurity?.pin : undefined,
+        pin: (isAuthed && isSecEnabled) ? state.officeSecurity?.pin : undefined,
       },
-      approvedDevices: isHost ? (state.approvedDevices || []) : undefined,
-      pendingApprovalRequests: isHost ? (state.pendingApprovalRequests || []) : undefined,
+      approvedDevices: (isHost && isSecEnabled) ? (state.approvedDevices || []) : undefined,
+      pendingApprovalRequests: (isHost && isSecEnabled) ? (state.pendingApprovalRequests || []) : undefined,
     });
   });
 

@@ -492,7 +492,7 @@ wss.on('connection', (ws, req) => {
   }
 
   // If host requires explicit device approval:
-  if (isAuthenticated && !isHostClient && state.officeSecurity?.requireApproval) {
+  if (state.officeSecurity?.enabled && isAuthenticated && !isHostClient && state.officeSecurity?.requireApproval) {
     const approvedList = Array.isArray(state.approvedDevices) ? state.approvedDevices : [];
     if (!approvedList.includes(clientId)) {
       isAuthenticated = false;
@@ -584,8 +584,8 @@ wss.on('connection', (ws, req) => {
       if (msg.type === 'authenticate') {
         const clientPin = (msg.pin || '').toString().trim();
         const msgDeviceId = msg.deviceId || queryId || clientId;
-        if (clientPin === s.officeSecurity?.pin) {
-          if (s.officeSecurity?.requireApproval && !ws.isHost) {
+        if (!s.officeSecurity?.enabled || clientPin === s.officeSecurity?.pin) {
+          if (s.officeSecurity?.enabled && s.officeSecurity?.requireApproval && !ws.isHost) {
             const approvedList = Array.isArray(s.approvedDevices) ? s.approvedDevices : [];
             if (!approvedList.includes(msgDeviceId)) {
               ws.isAuthenticated = false;

@@ -302,8 +302,14 @@ export function useWebSocket() {
 
           switch (data.type) {
             case 'auth_required': {
-              setIsOfficeLocked(true);
-              setOfficeSecurityEnabled(true);
+              const secEnabled = Boolean(data.officeSecurity);
+              if (secEnabled) {
+                setIsOfficeLocked(true);
+                setOfficeSecurityEnabled(true);
+              } else {
+                setIsOfficeLocked(false);
+                setOfficeSecurityEnabled(false);
+              }
               break;
             }
 
@@ -325,15 +331,28 @@ export function useWebSocket() {
               if (!isEnabled) {
                 setIsOfficeLocked(false);
               }
+              setServerInfo((prev) => prev ? {
+                ...prev,
+                officeSecurity: {
+                  ...prev.officeSecurity,
+                  enabled: isEnabled,
+                  pin: data.officeSecurity?.pin,
+                  requireApproval: Boolean(data.officeSecurity?.requireApproval),
+                  requiresAuth: isEnabled,
+                  isPendingApproval: false,
+                },
+                pendingApprovalRequests: isEnabled ? prev.pendingApprovalRequests : [],
+              } : prev);
               break;
             }
 
             case 'init': {
-              if (data.isHost) {
+              const secEnabled = Boolean(data.officeSecurity?.enabled);
+              setOfficeSecurityEnabled(secEnabled);
+              if (!secEnabled || data.isHost) {
                 setIsOfficeLocked(false);
               }
               if (data.officeSecurity) {
-                setOfficeSecurityEnabled(Boolean(data.officeSecurity.enabled));
                 if (data.officeSecurity.pin) {
                   setOfficePin(data.officeSecurity.pin);
                   try {
@@ -582,8 +601,9 @@ export function useWebSocket() {
           setIsOfficeLocked(false);
         }
         if (info.officeSecurity) {
-          setOfficeSecurityEnabled(Boolean(info.officeSecurity.enabled));
-          if (!info.isHost && info.officeSecurity.requiresAuth) {
+          const isSec = Boolean(info.officeSecurity.enabled);
+          setOfficeSecurityEnabled(isSec);
+          if (isSec && !info.isHost && info.officeSecurity.requiresAuth) {
             setIsOfficeLocked(true);
           } else {
             setIsOfficeLocked(false);
@@ -594,6 +614,9 @@ export function useWebSocket() {
               localStorage.setItem('airbridge_office_pin', info.officeSecurity.pin);
             } catch (e) {}
           }
+        } else {
+          setIsOfficeLocked(false);
+          setOfficeSecurityEnabled(false);
         }
       })
       .catch((e) => console.log('Info fetch error:', e));

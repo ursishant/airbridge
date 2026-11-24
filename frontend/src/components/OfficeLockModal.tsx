@@ -22,12 +22,16 @@ export const OfficeLockModal: React.FC<OfficeLockModalProps> = ({
   const [errorMsg, setErrorMsg] = useState('');
   const [isWaitingApproval, setIsWaitingApproval] = useState(false);
 
-  // Auto-detect if server already reported pending approval
+  // Auto-detect if server already reported pending approval or if security is disabled
   useEffect(() => {
+    if (serverInfo?.officeSecurity && !serverInfo.officeSecurity.enabled) {
+      setIsWaitingApproval(false);
+      return;
+    }
     if (serverInfo?.officeSecurity?.isPendingApproval) {
       setIsWaitingApproval(true);
     }
-  }, [serverInfo?.officeSecurity?.isPendingApproval]);
+  }, [serverInfo?.officeSecurity?.isPendingApproval, serverInfo?.officeSecurity?.enabled]);
 
   // Polling for approval resolution while waiting
   useEffect(() => {
