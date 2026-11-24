@@ -16,6 +16,31 @@
 
 <br />
 
+<!-- 3-Step Zero-Install Flow Strip -->
+<table align="center" width="100%">
+  <tr>
+    <td align="center" width="31%" style="padding: 16px 12px;">
+      <div style="font-size: 26px; margin-bottom: 6px;">💻</div>
+      <b>1. Start on Your Laptop</b><br/>
+      <sub>Run AirBridge on Windows, Mac, or Linux.<br/><b>Only your computer needs an install.</b></sub>
+    </td>
+    <td align="center" width="5%" style="font-size: 20px; color: #0071E3;">➔</td>
+    <td align="center" width="31%" style="padding: 16px 12px;">
+      <div style="font-size: 26px; margin-bottom: 6px;">📱</div>
+      <b>2. Scan QR on Your Phone</b><br/>
+      <sub>Point your iPhone or Android camera at the QR code.<br/><b>Zero apps to download or install.</b></sub>
+    </td>
+    <td align="center" width="5%" style="font-size: 20px; color: #10B981;">➔</td>
+    <td align="center" width="31%" style="padding: 16px 12px;">
+      <div style="font-size: 26px; margin-bottom: 6px;">⚡</div>
+      <b>3. Beam & Sync Instantly</b><br/>
+      <sub>Send large files, folders, and sync clipboard.<br/>Direct gigabit local Wi-Fi speed (50–100+ MB/s).</sub>
+    </td>
+  </tr>
+</table>
+
+<br />
+
 | Dark Mode (Obsidian & Electric Lime) | Light Mode (Clean Bento) |
 |:---:|:---:|
 | ![Dark Mode Dashboard](docs/screenshots/desktop-dark.png) | ![Light Mode Dashboard](docs/screenshots/desktop-light.png) |
@@ -50,14 +75,15 @@ AirBridge solves this friction. It runs a native host daemon on Windows, macOS, 
 ### 1. Multi-Device LAN File & Folder Sharing
 - **Recursive Folder Engine**: Preserves complete directory trees during upload and download.
 - **Large File Streaming**: Resumable chunked pipeline reliably beams multi-gigabyte video archives and ISO images up to 10GB+.
-- **Vault Archive**: Grid and list views with file previews, on-demand ZIP archive compilation, single-file downloads, and instant delete confirmations.
+- **Vault Archive & Bulk Deletion**: Grid and list views with file previews, on-demand ZIP archive compilation, single-file downloads, and multi-file bulk deletion with select-all bar.
 - **Native OS Reveal**: Click Explorer on Windows or Finder on macOS to highlight files directly in their folder.
 
-### 2. Office Wi-Fi Security & Room PIN Protection
+### 2. Office Wi-Fi Security, Room PIN & Host Approval Whitelist
 - **Subnet Privacy**: Protects your shared files and clipboard from unauthorized devices on shared office or co-working Wi-Fi networks.
 - **4-Digit Room PIN**: Host machines can enable Room PIN protection with one click.
+- **Host Approval Whitelist (Group Isolation)**: When working in a large office, restrict file visibility and downloads strictly to an approved group (e.g., 5 team members) via live 1-click host approval.
 - **Zero-Friction Camera Pairing**: The host pairing QR code automatically embeds the secure PIN token, allowing mobile cameras to authenticate seamlessly upon scanning.
-- **Brute-Force Rate Limiting**: Dedicated rate limiting on authentication endpoints stops automated subnet probing.
+- **Progressive Brute-Force Rate Limiting**: Exponential lockout on authentication endpoints completely blocks automated subnet probing.
 
 ### 3. Universal Live Clipboard & Two-Way Messaging
 - **Instant Clipboard Sync**: Text, URLs, code snippets, or tokens copied on any connected device sync immediately via WebSockets.
