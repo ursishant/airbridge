@@ -15,6 +15,46 @@ interface OfficeSecuritySettingsModalProps {
   showToast: (msg: string) => void;
 }
 
+interface LuxuryToggleProps {
+  checked: boolean;
+  onChange: () => void;
+  disabled?: boolean;
+  activeColor?: string;
+  ariaLabel?: string;
+}
+
+const LuxuryToggle: React.FC<LuxuryToggleProps> = ({
+  checked,
+  onChange,
+  disabled = false,
+  activeColor = 'bg-[#0071E3]',
+  ariaLabel,
+}) => {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={ariaLabel}
+      disabled={disabled}
+      onClick={(e) => {
+        e.stopPropagation();
+        if (!disabled) onChange();
+      }}
+      className={`relative inline-flex h-7 w-12 shrink-0 items-center rounded-full p-0.5 transition-colors duration-200 focus:outline-none ${
+        checked ? activeColor : 'bg-black/20 dark:bg-white/20'
+      } ${disabled ? 'opacity-50 cursor-wait' : 'cursor-pointer'}`}
+    >
+      <motion.span
+        layout
+        transition={{ type: 'spring', stiffness: 500, damping: 32 }}
+        animate={{ x: checked ? 20 : 0 }}
+        className="pointer-events-none block h-6 w-6 rounded-full bg-white shadow-md ring-0"
+      />
+    </button>
+  );
+};
+
 export const OfficeSecuritySettingsModal: React.FC<OfficeSecuritySettingsModalProps> = ({
   isOpen,
   onClose,
@@ -29,6 +69,7 @@ export const OfficeSecuritySettingsModal: React.FC<OfficeSecuritySettingsModalPr
   const [copiedPin, setCopiedPin] = useState(false);
   const [copiedLink, setCopiedLink] = useState(false);
   const [isUpdating, setIsUpdating] = useState(false);
+  const [approvingId, setApprovingId] = useState<string | null>(null);
   const [customPin, setCustomPin] = useState(officePin || '');
 
   const requireApproval = Boolean(serverInfo?.officeSecurity?.requireApproval);
@@ -165,23 +206,13 @@ export const OfficeSecuritySettingsModal: React.FC<OfficeSecuritySettingsModalPr
                 </p>
               </div>
 
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  handleToggle();
-                }}
+              <LuxuryToggle
+                checked={officeSecurityEnabled}
+                onChange={handleToggle}
                 disabled={isUpdating}
-                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none ${
-                  officeSecurityEnabled ? 'bg-[#10B981]' : 'bg-black/20 dark:bg-white/20'
-                } ${isUpdating ? 'opacity-60 cursor-wait' : 'cursor-pointer'}`}
-              >
-                <span
-                  className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                    officeSecurityEnabled ? 'translate-x-6' : 'translate-x-1'
-                  }`}
-                />
-              </button>
+                activeColor="bg-[#10B981]"
+                ariaLabel="Toggle Office Room Protection"
+              />
             </div>
 
             {/* Strict Device Approval Gate (5-people group isolation) */}
@@ -200,56 +231,86 @@ export const OfficeSecuritySettingsModal: React.FC<OfficeSecuritySettingsModalPr
                   </p>
                 </div>
 
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    handleToggleRequireApproval();
-                  }}
+                <LuxuryToggle
+                  checked={requireApproval}
+                  onChange={handleToggleRequireApproval}
                   disabled={isUpdating}
-                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none ${
-                    requireApproval ? 'bg-[#0071E3]' : 'bg-black/20 dark:bg-white/20'
-                  } ${isUpdating ? 'opacity-60 cursor-wait' : 'cursor-pointer'}`}
-                >
-                  <span
-                    className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                      requireApproval ? 'translate-x-6' : 'translate-x-1'
-                    }`}
-                  />
-                </button>
+                  activeColor="bg-[#0071E3]"
+                  ariaLabel="Toggle Host Approval Whitelist"
+                />
               </div>
             )}
 
             {/* Pending Requests Section (Live Host Gate) */}
             {pendingRequests.length > 0 && onApproveDevice && (
-              <div className="mb-4 p-4 rounded-2xl bg-[#0071E3]/10 dark:bg-[#0071E3]/15 border border-[#0071E3]/30 space-y-2">
-                <span className="text-[11px] font-bold uppercase tracking-wider text-[#0071E3] dark:text-[#38BDF8]">
-                  Pending Connection Requests ({pendingRequests.length})
-                </span>
-                {pendingRequests.map((req: any) => (
-                  <div key={req.id} className="flex items-center justify-between p-2 rounded-xl bg-white dark:bg-[#1A1D26] border border-black/[0.08] dark:border-white/[0.08]">
-                    <div className="min-w-0 pr-2">
-                      <p className="text-xs font-bold text-[#0F1115] dark:text-white truncate">{req.name}</p>
-                      <p className="text-[10px] text-[#64748B] dark:text-[#94A3B8]">{req.ip}</p>
+              <div className="mb-4 p-4 rounded-2xl bg-[#0071E3]/10 dark:bg-[#0071E3]/15 border border-[#0071E3]/30 space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-bold uppercase tracking-wider text-[#0071E3] dark:text-[#38BDF8]">
+                    Pending Connection Requests ({pendingRequests.length})
+                  </span>
+                  <span className="text-[10px] text-[#64748B] dark:text-[#94A3B8]">
+                    Awaiting Host Approval
+                  </span>
+                </div>
+                <div className="space-y-2">
+                  {pendingRequests.map((req: any) => (
+                    <div
+                      key={req.id}
+                      className="flex items-center justify-between p-3 rounded-xl bg-white dark:bg-[#1A1D26] border border-black/[0.08] dark:border-white/[0.08] shadow-sm gap-2"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <p className="text-xs font-bold text-[#0F1115] dark:text-white truncate">
+                          {req.name}
+                        </p>
+                        <p className="text-[10px] text-[#64748B] dark:text-[#94A3B8] font-mono mt-0.5">
+                          {req.ip}
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            if (approvingId) return;
+                            setApprovingId(req.id);
+                            try {
+                              await onApproveDevice(req.id, true);
+                            } finally {
+                              setApprovingId(null);
+                            }
+                          }}
+                          disabled={approvingId === req.id}
+                          className="apple-press flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-[#10B981] hover:bg-[#059669] text-white shadow-sm transition-all disabled:opacity-60"
+                          title="Approve access"
+                        >
+                          {approvingId === req.id ? (
+                            <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                          ) : (
+                            <UserCheck className="w-3.5 h-3.5" />
+                          )}
+                          <span>Accept</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            if (approvingId) return;
+                            setApprovingId(req.id);
+                            try {
+                              await onApproveDevice(req.id, false);
+                            } finally {
+                              setApprovingId(null);
+                            }
+                          }}
+                          disabled={approvingId === req.id}
+                          className="apple-press flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-xs font-bold bg-red-500/10 hover:bg-red-500/20 text-red-600 dark:text-red-400 border border-red-500/20 transition-all disabled:opacity-60"
+                          title="Deny access"
+                        >
+                          <UserX className="w-3.5 h-3.5" />
+                          <span>Deny</span>
+                        </button>
+                      </div>
                     </div>
-                    <div className="flex items-center gap-1.5 shrink-0">
-                      <button
-                        onClick={() => onApproveDevice(req.id, true)}
-                        className="apple-press p-1.5 rounded-lg bg-[#10B981] text-white hover:bg-[#059669]"
-                        title="Approve access"
-                      >
-                        <UserCheck className="w-3.5 h-3.5" />
-                      </button>
-                      <button
-                        onClick={() => onApproveDevice(req.id, false)}
-                        className="apple-press p-1.5 rounded-lg bg-red-500 text-white hover:bg-red-600"
-                        title="Deny access"
-                      >
-                        <UserX className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                  </div>
-                ))}
+                  ))}
+                </div>
               </div>
             )}
 

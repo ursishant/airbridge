@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import confetti from 'canvas-confetti';
-import { Download, Zap, ArrowRight, Volume2, Users, UserCheck, UserX } from 'lucide-react';
+import { Download, Zap, ArrowRight, Volume2, Users, UserCheck, UserX, RefreshCw } from 'lucide-react';
 import { Header } from './components/Header';
 import { DynamicIsland } from './components/DynamicIsland';
 import { DragDropPortal } from './components/DragDropPortal';
@@ -94,6 +94,7 @@ export const App: React.FC = () => {
   const [isCameraSnapOpen, setIsCameraSnapOpen] = useState(false);
   const [isOnTheGoOpen, setIsOnTheGoOpen] = useState(false);
   const [isOfficeSecurityOpen, setIsOfficeSecurityOpen] = useState(false);
+  const [isApprovingReq, setIsApprovingReq] = useState(false);
   const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
 
   // Global Drag & Drop State
@@ -436,15 +437,35 @@ export const App: React.FC = () => {
 
               <div className="flex items-center gap-2 self-stretch sm:self-auto shrink-0 justify-end">
                 <button
-                  onClick={() => handleApproveDevice(firstReq.id, true)}
-                  className="apple-press flex-1 sm:flex-none flex items-center justify-center gap-1.5 px-4 py-2 rounded-xl text-xs font-bold bg-[#10B981] hover:bg-[#059669] text-white shadow-md transition-all"
+                  type="button"
+                  disabled={isApprovingReq}
+                  onClick={async () => {
+                    if (isApprovingReq) return;
+                    setIsApprovingReq(true);
+                    try {
+                      await handleApproveDevice(firstReq.id, true);
+                    } finally {
+                      setIsApprovingReq(false);
+                    }
+                  }}
+                  className="apple-press flex-1 sm:flex-none flex items-center justify-center gap-1.5 px-4 py-2 rounded-xl text-xs font-bold bg-[#10B981] hover:bg-[#059669] text-white shadow-md transition-all disabled:opacity-60"
                 >
-                  <UserCheck className="w-4 h-4" />
+                  {isApprovingReq ? <RefreshCw className="w-4 h-4 animate-spin" /> : <UserCheck className="w-4 h-4" />}
                   <span>Approve Access</span>
                 </button>
                 <button
-                  onClick={() => handleApproveDevice(firstReq.id, false)}
-                  className="apple-press flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold bg-red-500 hover:bg-red-600 text-white shadow-md transition-all"
+                  type="button"
+                  disabled={isApprovingReq}
+                  onClick={async () => {
+                    if (isApprovingReq) return;
+                    setIsApprovingReq(true);
+                    try {
+                      await handleApproveDevice(firstReq.id, false);
+                    } finally {
+                      setIsApprovingReq(false);
+                    }
+                  }}
+                  className="apple-press flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold bg-red-500 hover:bg-red-600 text-white shadow-md transition-all disabled:opacity-60"
                 >
                   <UserX className="w-4 h-4" />
                   <span>Deny</span>

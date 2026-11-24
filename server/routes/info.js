@@ -1,5 +1,5 @@
 const express = require('express');
-const { isHostRequest, isAuthorizedRequest, getClientDeviceId } = require('../middleware/auth');
+const { isHostRequest, isHostAddress, isAuthorizedRequest, getClientDeviceId, BOOT_HOST_SECRET, getHostAddresses } = require('../middleware/auth');
 
 function createInfoRouter(options) {
   const router = express.Router();
@@ -38,6 +38,21 @@ function createInfoRouter(options) {
       osDisplay = 'Linux ' + require('os').release();
     }
 
+    let pendingRequests = state.pendingApprovalRequests || [];
+    if (Array.isArray(pendingRequests)) {
+      const hostIps = getHostAddresses();
+      pendingRequests = pendingRequests.filter(r => !hostIps.has(r.ip?.toLowerCase()) && !isHostAddress(r.ip));
+      state.pendingApprovalRequests = pendingRequests;
+    }
+
+    if (isHost) {
+      res.cookie('airbridge_host_token', BOOT_HOST_SECRET, {
+        httpOnly: false,
+        sameSite: 'strict',
+        maxAge: 7 * 24 * 60 * 60 * 1000,
+      });
+    }
+
     res.json({
       primaryIp: net.primaryIp,
       allIps: net.allIps,
@@ -50,6 +65,7 @@ function createInfoRouter(options) {
       isMac,
       isLinux,
       isHost,
+      hostToken: isHost ? BOOT_HOST_SECRET : undefined,
       downloadsDir: getSanitizedDownloadsDir(),
       connectedCount: getUniqueDevices().length,
       officeSecurity: {
@@ -60,7 +76,7 @@ function createInfoRouter(options) {
         pin: (isAuthed && isSecEnabled) ? state.officeSecurity?.pin : undefined,
       },
       approvedDevices: (isHost && isSecEnabled) ? (state.approvedDevices || []) : undefined,
-      pendingApprovalRequests: (isHost && isSecEnabled) ? (state.pendingApprovalRequests || []) : undefined,
+      pendingApprovalRequests: (isHost && isSecEnabled) ? pendingRequests : undefined,
     });
   });
 

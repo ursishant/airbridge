@@ -444,11 +444,13 @@ wss.on('connection', (ws, req) => {
   let queryId = null;
   let queryName = null;
   let queryPin = null;
+  let queryHostToken = null;
   try {
     const urlObj = new URL(req.url, 'http://localhost');
     queryId = urlObj.searchParams.get('id');
     queryName = urlObj.searchParams.get('name');
     queryPin = urlObj.searchParams.get('pin');
+    queryHostToken = urlObj.searchParams.get('hostToken');
   } catch (e) {}
 
   const userAgent = req.headers['user-agent'] || '';
@@ -476,7 +478,10 @@ wss.on('connection', (ws, req) => {
   const clientName = queryName || defaultClientName;
   const ip = req.socket.remoteAddress ? req.socket.remoteAddress.replace(/^.*:/, '') : 'local';
 
-  const isHostClient = isHostRequest(req);
+  const cookies = parseCookies(req.headers.cookie);
+  const isHostClient = (queryHostToken && queryHostToken === BOOT_HOST_SECRET) ||
+    (cookies['airbridge_host_token'] && cookies['airbridge_host_token'] === BOOT_HOST_SECRET) ||
+    isHostRequest(req);
   const state = stateStore.getState();
   let isAuthenticated = !state.officeSecurity?.enabled || isHostClient;
 

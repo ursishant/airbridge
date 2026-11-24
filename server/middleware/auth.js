@@ -37,6 +37,17 @@ function isLoopbackAddress(ip) {
 }
 
 /**
+ * Checks if an IP is one of the host's own local interfaces (loopback or local LAN interface)
+ */
+function isHostAddress(ip) {
+  if (!ip) return false;
+  if (isLoopbackAddress(ip)) return true;
+  const clean = (ip || '').toLowerCase().replace(/^::ffff:/, '');
+  const hostIps = getHostAddresses();
+  return hostIps.has(clean);
+}
+
+/**
  * Validates whether the request originated from the local host machine.
  */
 function isHostRequest(req, requireToken = false) {
@@ -47,17 +58,21 @@ function isHostRequest(req, requireToken = false) {
     return false;
   }
 
-  const remoteIp = getNormalizedRemoteAddress(req);
-  if (!isLoopbackAddress(remoteIp)) {
-    return false;
+  const cookies = parseCookies(req.headers ? req.headers.cookie : undefined);
+  const token = (req.headers && req.headers['x-airbridge-host-token']) ||
+    cookies['airbridge_host_token'] ||
+    (req.query && req.query.hostToken);
+
+  if (token && token === BOOT_HOST_SECRET) {
+    return true;
   }
 
   if (requireToken) {
-    const token = req.headers['x-airbridge-host-token'] || (req.query && req.query.hostToken);
-    return token === BOOT_HOST_SECRET;
+    return false;
   }
 
-  return true;
+  const remoteIp = getNormalizedRemoteAddress(req);
+  return isHostAddress(remoteIp);
 }
 
 /**
@@ -336,6 +351,7 @@ module.exports = {
   SESSION_SECRET,
   getNormalizedRemoteAddress,
   isLoopbackAddress,
+  isHostAddress,
   isHostRequest,
   getHostAddresses,
   createCorsOriginValidator,

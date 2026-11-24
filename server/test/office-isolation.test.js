@@ -55,6 +55,20 @@ describe('Office Isolation & Targeted Group Sharing Security Tests', () => {
       assert.equal(statusPending.approved, false);
       assert.equal(statusPending.pending, true);
 
+      // Verify peer cannot approve devices
+      const rogueApproveRes = await fetch(`${baseUrl}/api/office/approve-device`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-airbridge-simulated-peer': 'true',
+        },
+        body: JSON.stringify({
+          deviceId: 'dev_stranger_on_wifi',
+          approved: true,
+        }),
+      });
+      assert.equal(rogueApproveRes.status, 403);
+
       // 2. Host approves the device
       const approveRes = await fetch(`${baseUrl}/api/office/approve-device`, {
         method: 'POST',

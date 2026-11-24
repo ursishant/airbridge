@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { SoundEffects } from '../components/SoundEffects';
 import type { ToastInfo } from '../components/DynamicIsland';
-import { getDeviceId, getDeviceName } from '../utils/device';
+import { getDeviceId, getDeviceName, getHostToken, getAuthHeaders } from '../utils/device';
 
 export interface ConnectedDevice {
   id: string;
@@ -247,7 +247,9 @@ export function useWebSocket() {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const host = window.location.host;
     const pinPart = officePinRef.current ? `&pin=${encodeURIComponent(officePinRef.current)}` : '';
-    const wsUrl = `${protocol}//${host}/ws?id=${encodeURIComponent(myDeviceIdRef.current)}&name=${encodeURIComponent(deviceNameRef.current)}${pinPart}`;
+    const hostToken = getHostToken();
+    const hostTokenPart = hostToken ? `&hostToken=${encodeURIComponent(hostToken)}` : '';
+    const wsUrl = `${protocol}//${host}/ws?id=${encodeURIComponent(myDeviceIdRef.current)}&name=${encodeURIComponent(deviceNameRef.current)}${pinPart}${hostTokenPart}`;
 
     try {
       const ws = new WebSocket(wsUrl);
@@ -587,18 +589,16 @@ export function useWebSocket() {
   useEffect(() => {
     connect();
 
-    // Fetch server info with optional office PIN
-    const headers: Record<string, string> = {};
-    if (officePinRef.current) {
-      headers['x-airbridge-pin'] = officePinRef.current;
-    }
-
-    fetch('/api/info', { headers })
+    // Fetch server info with auth headers (including deviceId, pin, and host token)
+    fetch('/api/info', { headers: getAuthHeaders() })
       .then((res) => res.json())
       .then((info) => {
         setServerInfo(info);
         if (info.isHost) {
           setIsOfficeLocked(false);
+          if (info.hostToken) {
+            try { localStorage.setItem('airbridge_host_token', info.hostToken); } catch (_) {}
+          }
         }
         if (info.officeSecurity) {
           const isSec = Boolean(info.officeSecurity.enabled);
@@ -733,11 +733,16 @@ export function useWebSocket() {
   // Host Action: Approve or Deny Colleague Device
   const handleApproveDevice = useCallback(async (deviceId: string, approved: boolean): Promise<boolean> => {
     try {
+      const headers = getAuthHeaders({ 'Content-Type': 'application/json' });
+      const hostToken = localStorage.getItem('airbridge_host_token');
+      if (hostToken) headers['x-airbridge-host-token'] = hostToken;
+
       const res = await fetch('/api/office/approve-device', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({ deviceId, approved }),
       });
+      const data = await res.json().catch(() => ({}));
       if (res.ok) {
         setServerInfo((prev) => {
           if (!prev) return null;
@@ -751,11 +756,13 @@ export function useWebSocket() {
             approvedDevices: approvedList,
           };
         });
-        showToast(approved ? 'Device Approved for Private Sharing' : 'Device Access Denied');
+        showToast(approved ? 'Colleague Approved! Access Granted' : 'Device Access Denied');
         return true;
       }
+      showToast(data.error || 'Failed to approve device');
       return false;
     } catch (_) {
+      showToast('Error connecting to server');
       return false;
     }
   }, [showToast]);

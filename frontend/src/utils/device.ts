@@ -34,6 +34,14 @@ export function getOfficePin(): string {
   }
 }
 
+export function getHostToken(): string {
+  try {
+    return localStorage.getItem('airbridge_host_token') || '';
+  } catch {
+    return '';
+  }
+}
+
 export function getAuthHeaders(extra?: Record<string, string>): Record<string, string> {
   const headers: Record<string, string> = {
     'x-airbridge-device-id': getDeviceId(),
@@ -42,6 +50,10 @@ export function getAuthHeaders(extra?: Record<string, string>): Record<string, s
   const pin = getOfficePin();
   if (pin) {
     headers['x-airbridge-pin'] = pin;
+  }
+  const hostToken = getHostToken();
+  if (hostToken) {
+    headers['x-airbridge-host-token'] = hostToken;
   }
   return headers;
 }
