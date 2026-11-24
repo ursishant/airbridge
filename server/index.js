@@ -4,7 +4,7 @@ const { WebSocketServer, WebSocket } = require('ws');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
-const { exec, execFile, spawn } = require('child_process');
+const { exec, execFile } = require('child_process');
 const crypto = require('crypto');
 const multer = require('multer');
 const cors = require('cors');
@@ -13,23 +13,25 @@ try {
   compression = require('compression');
 } catch (e) {}
 const rateLimit = require('express-rate-limit');
-const { ZipArchive } = require('archiver');
 const qrcodeTerminal = require('qrcode-terminal');
-const { resolveUploadTarget } = require('./lib/uploadPaths');
 
-// Global safety crash guards for unhandled async rejections or orphaned handles
-process.on('uncaughtException', (err) => {
-  console.error('[AirBridge Server] Uncaught Exception:', err);
-  // A listen failure is always fatal (the server cannot serve without its
-  // socket): exit instead of idling as a zombie process.
-  if (err && err.syscall === 'listen') {
-    console.error('[AirBridge Server] Fatal: cannot listen, exiting.');
-    process.exit(1);
-  }
-});
-process.on('unhandledRejection', (reason) => {
-  console.error('[AirBridge Server] Unhandled Rejection:', reason);
-});
+const { resolveUploadTarget } = require('./lib/uploadPaths');
+const { StateStore } = require('./lib/stateStore');
+const { CHUNKS_TEMP_DIR, startChunkReaper } = require('./lib/chunkReaper');
+const {
+  BOOT_HOST_SECRET,
+  isHostRequest,
+  createCorsOriginValidator,
+  createRequireOfficeAuth,
+  parseCookies,
+  verifySessionToken,
+} = require('./middleware/auth');
+
+const { createInfoRouter } = require('./routes/info');
+const { createOfficeRouter } = require('./routes/office');
+const { createChatRouter } = require('./routes/chat');
+const { createClipboardRouter } = require('./routes/clipboard');
+const { createFilesRouter } = require('./routes/files');
 
 const PORT = process.env.PORT || 5050;
 
@@ -51,6 +53,14 @@ const UPLOADS_DIR = fs.existsSync(DOWNLOADS_DIR) ? DOWNLOADS_DIR : path.join(__d
 if (!fs.existsSync(UPLOADS_DIR)) {
   fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 }
+
+// Initialize persistent state store with auto-migration from legacy UPLOADS_DIR
+const stateStore = new StateStore({
+  legacyUploadsDir: UPLOADS_DIR,
+});
+
+// Start startup + periodic 15-min chunk reaper (cleans abandoned chunks older than 2 hours)
+startChunkReaper(CHUNKS_TEMP_DIR);
 
 function getSanitizedHostname() {
   const raw = os.hostname() || 'AirBridge-Host';
@@ -87,10 +97,6 @@ function getNetworkIps() {
           isVirtual,
         });
 
-        // Preference order:
-        // 1. Non-virtual Wi-Fi or Ethernet
-        // 2. en0 on macOS or Wi-Fi on Windows
-        // 3. Standard private LAN subnets (192.168.x.x, 10.x.x.x, 172.16-31.x.x)
         if (!isVirtual) {
           if (preferredIp === 'localhost' || name === 'en0' || isWifi || isEthernet) {
             preferredIp = iface.address;
@@ -177,55 +183,26 @@ function playHostAlertSound() {
   }
 }
 
-
-
-// Function to resolve all local IP addresses of the host machine
-function getHostIpSet() {
-  const hostIps = new Set([
-    '127.0.0.1',
-    '::1',
-    'localhost',
-    'local',
-    '1',
-    '0.0.0.0',
-    '::',
-  ]);
-  try {
-    const interfaces = os.networkInterfaces();
-    for (const name of Object.keys(interfaces)) {
-      for (const iface of interfaces[name]) {
-        if (iface.address) {
-          hostIps.add(iface.address.toLowerCase());
-        }
-      }
-    }
-  } catch (e) {}
-  return hostIps;
-}
-
-function isHostRequest(req) {
-  const rawRemote = (req.socket.remoteAddress || '').toLowerCase();
-  const cleanRemote = rawRemote.replace(/^::ffff:/, '');
-  const hostIps = getHostIpSet();
-
-  if (hostIps.has(cleanRemote) || hostIps.has(rawRemote)) {
-    return true;
-  }
-  if (req.hostname === 'localhost' || req.hostname === '127.0.0.1') {
-    return true;
-  }
-  return false;
-}
-
 const app = express();
-app.set('trust proxy', 1);
-app.use(cors());
+
+// Security: ONLY trust proxy if explicitly configured via environment variable
+if (process.env.AIRBRIDGE_TRUST_PROXY === '1') {
+  app.set('trust proxy', 1);
+}
+
+// Security: Strict CORS allowing bound host/LAN origins, blocking malicious external websites
+app.use(cors({
+  origin: createCorsOriginValidator(PORT),
+  credentials: true,
+}));
+
+// Performance: Selective compression skipping binary transfer and files endpoints
 if (compression) {
   app.use(compression({
     filter: (req, res) => {
       const url = req.originalUrl || req.url || '';
       if (url.includes('/api/files') || url.includes('/api/download') || url.includes('/api/upload')) {
-        return false; // Skip compression for all binary and transfer streams
+        return false;
       }
       return compression.filter(req, res);
     }
@@ -238,7 +215,7 @@ app.use('/api', (req, res, next) => {
   next();
 });
 
-// Generous rate limiter for control/auth endpoints (never throttles file transfers or local LAN traffic)
+// Generous rate limiter for general API endpoints (never throttles file transfers or local LAN traffic)
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 50000,
@@ -255,20 +232,10 @@ const apiLimiter = rateLimit({
 
 app.use('/api', apiLimiter);
 
-// Dedicated strict rate limiter for Office Room PIN verification to prevent brute-forcing
-const pinAuthLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 50, // maximum 50 attempts per 15 minutes
-  message: { error: 'Too many PIN verification attempts. Please wait 15 minutes.' },
-  standardHeaders: true,
-  legacyHeaders: false,
-  validate: { trustProxy: false },
-});
-
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-// Configure multer for file uploads with robust directory structure preservation
+// Configure multer for file uploads
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
     let rawRel = file.originalname || '';
@@ -281,8 +248,6 @@ const storage = multer.diskStorage({
         }
       } catch (e) {}
     }
-    // Resolve through the containment helper so crafted paths can never
-    // escape the vault via mid-path ../ sequences.
     const target = resolveUploadTarget(UPLOADS_DIR, rawRel);
     file._cleanRelPath = target.cleanRel;
 
@@ -299,8 +264,6 @@ const storage = multer.diskStorage({
     const target = resolveUploadTarget(UPLOADS_DIR, file._cleanRelPath || file.originalname || 'file');
     const targetDir = target.targetDir;
 
-    // For single root files, avoid overwriting by appending timestamp if file exists.
-    // For structured folder uploads, preserve original file name for exact project mirroring.
     let finalName = target.fileName;
     if (!target.isNested) {
       const destPath = path.join(targetDir, finalName);
@@ -314,20 +277,16 @@ const storage = multer.diskStorage({
     cb(null, finalName);
   },
 });
+
 const upload = multer({
   storage: storage,
-  limits: { 
+  limits: {
     fileSize: 10 * 1024 * 1024 * 1024, // 10 GB limit for large video/files
     fieldSize: 100 * 1024 * 1024, // 100 MB limit for text fields/manifests
   },
 });
 
 // Configure disk storage for temporary chunk streaming in system temp directory
-const CHUNKS_TEMP_DIR = path.join(os.tmpdir(), 'airbridge_chunks');
-try {
-  fs.mkdirSync(CHUNKS_TEMP_DIR, { recursive: true });
-} catch (e) {}
-
 const chunkStorage = multer.diskStorage({
   destination: function (req, file, cb) {
     if (!fs.existsSync(CHUNKS_TEMP_DIR)) {
@@ -346,101 +305,22 @@ const chunkUpload = multer({
   limits: { fileSize: 64 * 1024 * 1024 }, // 64MB max per individual chunk
 });
 
-// Create HTTP and WebSocket server with zero timeout for giant transfers
+// Create HTTP server with disabled timeouts for high-throughput LAN transfers
 const server = http.createServer(app);
-server.requestTimeout = 0; // Disable request timeout
-server.headersTimeout = 0; // Disable headers timeout
-server.keepAliveTimeout = 300000; // 5 minutes keep-alive for parallel transfers
-server.timeout = 0; // No socket timeout
-const wss = new WebSocketServer({ server });
+server.requestTimeout = 0;
+server.headersTimeout = 0;
+server.keepAliveTimeout = 300000;
+server.timeout = 0;
+
+// WebSocket Server (noServer: true so upgrade requests can be authenticated strictly)
+const wss = new WebSocketServer({ noServer: true });
 wss.on('error', (err) => {
-  // Prevent unhandled WebSocket error crashing process when server port is occupied
   if (err && err.code !== 'EADDRINUSE') {
     console.error('[WebSocket Error]', err);
   }
 });
 
-// Persistent Application State (Chat history, Clipboard history, Known paired devices, Office Room Security)
-const STATE_FILE = path.join(UPLOADS_DIR, '.airbridge_state.json');
-
-let appState = {
-  chatHistory: [],
-  clipboardHistory: [],
-  knownDevices: [],
-  officeSecurity: {
-    enabled: false,
-    pin: String(Math.floor(1000 + Math.random() * 9000)),
-  },
-};
-
-// Load state from disk on startup
-try {
-  if (fs.existsSync(STATE_FILE)) {
-    const raw = fs.readFileSync(STATE_FILE, 'utf8');
-    const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed.chatHistory)) appState.chatHistory = parsed.chatHistory;
-    if (Array.isArray(parsed.clipboardHistory)) appState.clipboardHistory = parsed.clipboardHistory;
-    if (Array.isArray(parsed.knownDevices)) appState.knownDevices = parsed.knownDevices;
-    if (parsed.officeSecurity && typeof parsed.officeSecurity === 'object') {
-      appState.officeSecurity.enabled = Boolean(parsed.officeSecurity.enabled);
-    }
-    console.log(`[Storage] Loaded persistent state: ${appState.chatHistory.length} chats, ${appState.clipboardHistory.length} clipboard items.`);
-  }
-} catch (e) {
-  console.log('Error reading state file, starting fresh:', e.message);
-}
-
-function saveAppState() {
-  try {
-    const serialized = JSON.stringify({
-      chatHistory: Array.isArray(appState.chatHistory) ? appState.chatHistory : [],
-      clipboardHistory: Array.isArray(appState.clipboardHistory) ? appState.clipboardHistory : [],
-      knownDevices: Array.isArray(appState.knownDevices) ? appState.knownDevices : [],
-      officeSecurity: {
-        enabled: Boolean(appState.officeSecurity?.enabled),
-      },
-    }, null, 2);
-    fs.writeFileSync(STATE_FILE, serialized, 'utf8');
-  } catch (e) {
-    console.error('Error saving persistent state:', e.message);
-  }
-}
-
-
-
-// Office Room Security Authorization helpers
-function isAuthorizedRequest(req) {
-  if (!appState.officeSecurity || !appState.officeSecurity.enabled) {
-    return true;
-  }
-
-  // The host machine is always authorized
-  if (isHostRequest(req)) {
-    return true;
-  }
-
-  // Remote devices on shared Wi-Fi must supply the valid Room PIN
-  const clientPin = (req.headers['x-airbridge-pin'] || req.query.pin || (req.body && req.body.pin) || '').toString().trim();
-  return clientPin === appState.officeSecurity.pin && appState.officeSecurity.pin.length > 0;
-}
-
-function requireOfficeAuth(req, res, next) {
-  if (isAuthorizedRequest(req)) {
-    return next();
-  }
-  return res.status(401).json({
-    error: 'Office Space is protected by Room PIN',
-    officeSecurity: true,
-    requiresPin: true,
-  });
-}
-
-// Connected devices state (active live sockets)
 const connectedClients = new Map();
-
-// In-memory cache for /api/files list (2-second TTL during high-throughput transfers)
-let cachedFilesList = null;
-let lastFilesListTime = 0;
 
 // Helper to broadcast WebSocket messages
 function broadcast(message, excludeWs = null) {
@@ -452,7 +332,7 @@ function broadcast(message, excludeWs = null) {
   });
 }
 
-// Throttled broadcast for files_uploaded — coalesces into 1 broadcast per second during bulk uploads
+// Coalescing broadcast for file uploads (1 broadcast/sec during bulk transfers)
 let pendingUploadFiles = [];
 let pendingUploadSender = '';
 let uploadBroadcastTimer = null;
@@ -467,8 +347,6 @@ function broadcastFilesUploaded(files, sender) {
       pendingUploadFiles = [];
       pendingUploadSender = '';
       uploadBroadcastTimer = null;
-      // Invalidate file list cache so next /api/files returns fresh data
-      cachedFilesList = null;
       broadcast({
         type: 'files_uploaded',
         files: batch,
@@ -485,9 +363,8 @@ function getUniqueDevices() {
       const ip = (info.ip || 'local').replace(/^.*:/, '').trim().toLowerCase();
       const osKey = (info.os || 'unknown').trim().toLowerCase();
       const nameKey = (info.name || '').trim().toLowerCase();
-      // Unique physical key: IP + OS + Name
       const key = `${ip}_${osKey}_${nameKey}`;
-      
+
       if (deviceMap.has(key)) {
         const existing = deviceMap.get(key);
         if (!existing.battery && info.battery) {
@@ -508,6 +385,43 @@ function broadcastDevicesList() {
     devices,
   });
 }
+
+// Enforce Session Validation on WebSocket Upgrade Requests
+server.on('upgrade', (req, socket, head) => {
+  const state = stateStore.getState();
+  if (state.officeSecurity?.enabled) {
+    const isHost = isHostRequest(req);
+    let isAuthed = isHost;
+
+    if (!isAuthed) {
+      const cookies = parseCookies(req.headers.cookie);
+      const sessionCookie = cookies['airbridge_session'];
+      if (sessionCookie && verifySessionToken(sessionCookie)) {
+        isAuthed = true;
+      }
+    }
+
+    if (!isAuthed) {
+      try {
+        const urlObj = new URL(req.url, 'http://localhost');
+        const queryPin = urlObj.searchParams.get('pin');
+        if (queryPin && queryPin === state.officeSecurity.pin) {
+          isAuthed = true;
+        }
+      } catch (_) {}
+    }
+
+    if (!isAuthed) {
+      socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+  }
+
+  wss.handleUpgrade(req, socket, head, (ws) => {
+    wss.emit('connection', ws, req);
+  });
+});
 
 // WebSocket connection handling
 wss.on('connection', (ws, req) => {
@@ -552,14 +466,22 @@ wss.on('connection', (ws, req) => {
   const ip = req.socket.remoteAddress ? req.socket.remoteAddress.replace(/^.*:/, '') : 'local';
 
   const isHostClient = isHostRequest(req);
-  let isAuthenticated = !appState.officeSecurity?.enabled || isHostClient;
-  if (!isAuthenticated && queryPin && queryPin === appState.officeSecurity?.pin) {
+  const state = stateStore.getState();
+  let isAuthenticated = !state.officeSecurity?.enabled || isHostClient;
+
+  if (!isAuthenticated) {
+    const cookies = parseCookies(req.headers.cookie);
+    if (cookies['airbridge_session'] && verifySessionToken(cookies['airbridge_session'])) {
+      isAuthenticated = true;
+    }
+  }
+
+  if (!isAuthenticated && queryPin && queryPin === state.officeSecurity?.pin) {
     isAuthenticated = true;
   }
   ws.isAuthenticated = isAuthenticated;
   ws.isHost = isHostClient;
 
-  // Terminate any stale socket from the exact same device ID or physical IP+OS to prevent duplicates
   for (const [oldWs, oldInfo] of connectedClients.entries()) {
     if (oldWs !== ws) {
       const matchId = (queryId && oldInfo.id === queryId) || (oldInfo.id === clientId);
@@ -583,13 +505,14 @@ wss.on('connection', (ws, req) => {
   connectedClients.set(ws, initialDeviceInfo);
 
   function sendClientInit(targetWs) {
+    const s = stateStore.getState();
     targetWs.send(JSON.stringify({
       type: 'init',
       clientId,
       deviceInfo: initialDeviceInfo,
       devices: getUniqueDevices(),
-      chatHistory: appState.chatHistory.slice(-200),
-      clipboardHistory: appState.clipboardHistory.slice(-50),
+      chatHistory: s.chatHistory.slice(-200),
+      clipboardHistory: s.clipboardHistory.slice(-50),
       serverInfo: {
         downloadsDir: getSanitizedDownloadsDir(),
         hostname: getSanitizedHostname(),
@@ -600,8 +523,8 @@ wss.on('connection', (ws, req) => {
       },
       isHost: ws.isHost,
       officeSecurity: {
-        enabled: Boolean(appState.officeSecurity?.enabled),
-        pin: ws.isAuthenticated ? appState.officeSecurity?.pin : undefined,
+        enabled: Boolean(s.officeSecurity?.enabled),
+        pin: ws.isAuthenticated ? s.officeSecurity?.pin : undefined,
       },
     }));
   }
@@ -619,10 +542,11 @@ wss.on('connection', (ws, req) => {
   ws.on('message', async (raw) => {
     try {
       const msg = JSON.parse(raw.toString());
+      const s = stateStore.getState();
 
       if (msg.type === 'authenticate') {
         const clientPin = (msg.pin || '').toString().trim();
-        if (clientPin === appState.officeSecurity?.pin) {
+        if (clientPin === s.officeSecurity?.pin) {
           ws.isAuthenticated = true;
           sendClientInit(ws);
           broadcastDevicesList();
@@ -632,15 +556,13 @@ wss.on('connection', (ws, req) => {
         return;
       }
 
-      // Guard all messages behind authentication if Office Security is active
-      if (!ws.isAuthenticated && appState.officeSecurity?.enabled) {
+      if (!ws.isAuthenticated && s.officeSecurity?.enabled) {
         ws.send(JSON.stringify({ type: 'auth_required' }));
         return;
       }
 
       switch (msg.type) {
         case 'identify': {
-          // Client provides rich details (persistent device ID, device name, battery level, etc.)
           const current = connectedClients.get(ws) || {};
           const persistentId = msg.payload?.id || current.id || clientId;
 
@@ -657,19 +579,18 @@ wss.on('connection', (ws, req) => {
           };
           connectedClients.set(ws, updatedDevice);
 
-          // Track in known devices list (strictly capped and deduplicated)
-          const existingIdx = appState.knownDevices.findIndex(d => 
+          const existingIdx = s.knownDevices.findIndex(d =>
             d.id === persistentId || (d.ip === updatedDevice.ip && d.os === updatedDevice.os)
           );
           if (existingIdx >= 0) {
-            appState.knownDevices[existingIdx] = { ...appState.knownDevices[existingIdx], ...updatedDevice };
+            s.knownDevices[existingIdx] = { ...s.knownDevices[existingIdx], ...updatedDevice };
           } else {
-            appState.knownDevices.push(updatedDevice);
+            s.knownDevices.push(updatedDevice);
           }
-          if (appState.knownDevices.length > 10) {
-            appState.knownDevices = appState.knownDevices.slice(-10);
+          if (s.knownDevices.length > 10) {
+            s.knownDevices = s.knownDevices.slice(-10);
           }
-          saveAppState();
+          await stateStore.save();
           broadcastDevicesList();
           break;
         }
@@ -685,11 +606,9 @@ wss.on('connection', (ws, req) => {
             isPhone: /^\+?[0-9\s-]{7,15}$/.test(text.trim()),
           };
 
-          // Persist to server clipboard history
-          appState.clipboardHistory = [clipItem, ...appState.clipboardHistory.filter(c => c.id !== clipItem.id)].slice(0, 100);
-          saveAppState();
+          s.clipboardHistory = [clipItem, ...s.clipboardHistory.filter(c => c.id !== clipItem.id)].slice(0, 100);
+          await stateStore.save();
 
-          // Broadcast clipboard update to all other devices
           broadcast({
             type: 'clipboard_sync',
             payload: clipItem,
@@ -698,10 +617,9 @@ wss.on('connection', (ws, req) => {
         }
 
         case 'ring_device': {
-          // Ring Android or Mac
           broadcast({
             type: 'ring_device',
-            target: msg.target, // 'android' | 'mac' | 'all'
+            target: msg.target,
             from: initialDeviceInfo.name,
             timestamp: Date.now(),
           });
@@ -735,12 +653,11 @@ wss.on('connection', (ws, req) => {
             timestamp: msg.payload.timestamp || Date.now(),
           };
 
-          // Persist to server chat history
-          appState.chatHistory.push(chatMsg);
-          if (appState.chatHistory.length > 500) {
-            appState.chatHistory = appState.chatHistory.slice(-500);
+          s.chatHistory.push(chatMsg);
+          if (s.chatHistory.length > 500) {
+            s.chatHistory = s.chatHistory.slice(-500);
           }
-          saveAppState();
+          await stateStore.save();
 
           broadcast({
             type: 'chat_message',
@@ -750,15 +667,15 @@ wss.on('connection', (ws, req) => {
         }
 
         case 'clear_chat': {
-          appState.chatHistory = [];
-          saveAppState();
+          s.chatHistory = [];
+          await stateStore.save();
           broadcast({ type: 'chat_cleared' });
           break;
         }
 
         case 'clear_clipboard': {
-          appState.clipboardHistory = [];
-          saveAppState();
+          s.clipboardHistory = [];
+          await stateStore.save();
           broadcast({ type: 'clipboard_cleared' });
           break;
         }
@@ -777,7 +694,7 @@ wss.on('connection', (ws, req) => {
   });
 });
 
-// Periodic heartbeat to automatically reap dead sockets every 20 seconds
+// Periodic heartbeat
 const heartbeatInterval = setInterval(() => {
   for (const clientWs of connectedClients.keys()) {
     if (clientWs.isAlive === false || clientWs.readyState !== WebSocket.OPEN) {
@@ -790,992 +707,57 @@ const heartbeatInterval = setInterval(() => {
   }
   broadcastDevicesList();
 }, 20000);
+if (heartbeatInterval.unref) {
+  heartbeatInterval.unref();
+}
 
 wss.on('close', () => {
   clearInterval(heartbeatInterval);
 });
 
-// Helper to get recursive directory statistics (total files & size)
-function getDirectoryStats(dirPath) {
-  let count = 0;
-  let totalBytes = 0;
-  function recurse(current) {
-    try {
-      const items = fs.readdirSync(current);
-      for (const item of items) {
-        if (item === '.DS_Store' || item === 'Thumbs.db') continue;
-        const full = path.join(current, item);
-        const st = fs.statSync(full);
-        if (st.isDirectory()) {
-          recurse(full);
-        } else if (st.isFile()) {
-          count++;
-          totalBytes += st.size;
-        }
-      }
-    } catch (e) {}
-  }
-  recurse(dirPath);
-  return { count, totalBytes };
-}
-
-// REST API Endpoints
-
-// Server info & network discovery
-app.get('/api/info', apiLimiter, (req, res) => {
-  const net = getNetworkIps();
-  const isHost = isHostRequest(req);
-  const isAuthed = isHost || isAuthorizedRequest(req);
-  let osDisplay = 'macOS ' + os.release();
-  if (isWindows) {
-    osDisplay = 'Windows ' + (os.release().startsWith('10.0.2') ? '11' : '10');
-  } else if (isLinux) {
-    osDisplay = 'Linux ' + os.release();
-  }
-
-  res.json({
-    primaryIp: net.primaryIp,
-    allIps: net.allIps,
-    port: PORT,
-    url: `http://${net.primaryIp}:${PORT}`,
-    hostname: getSanitizedHostname(),
-    platform: process.platform,
-    os: osDisplay,
-    isWindows,
-    isMac,
-    isLinux,
-    isHost,
-    downloadsDir: getSanitizedDownloadsDir(),
-    connectedCount: getUniqueDevices().length,
-    officeSecurity: {
-      enabled: Boolean(appState.officeSecurity?.enabled),
-      requiresAuth: !isAuthed,
-      pin: isAuthed ? appState.officeSecurity?.pin : undefined,
-    },
-  });
-});
-
-// Battery endpoint for macOS & Windows host & web clients
-app.get('/api/battery', apiLimiter, async (req, res) => {
-  const battery = await getHostBattery();
-  res.json({ battery });
-});
-
-// Verify Office Room PIN
-app.post('/api/office/verify-pin', pinAuthLimiter, (req, res) => {
-  const pin = (req.body && req.body.pin ? String(req.body.pin) : '').trim();
-  if (!appState.officeSecurity?.enabled) {
-    return res.json({ success: true, enabled: false });
-  }
-  if (pin === appState.officeSecurity.pin) {
-    return res.json({ success: true, enabled: true });
-  }
-  return res.status(401).json({ error: 'Incorrect Room PIN', success: false });
-});
-
-// Configure Office Security (requires host or authed)
-app.post('/api/office/configure', apiLimiter, requireOfficeAuth, (req, res) => {
-  const { enabled, regenerate, pin } = req.body;
-  if (typeof enabled === 'boolean') {
-    appState.officeSecurity.enabled = enabled;
-  }
-  if (regenerate || !appState.officeSecurity.pin) {
-    appState.officeSecurity.pin = Math.floor(1000 + Math.random() * 9000).toString();
-  } else if (pin && typeof pin === 'string') {
-    const raw = pin.trim().replace(/[^0-9]/g, '').slice(0, 8);
-    const num = parseInt(raw, 10);
-    if (!isNaN(num) && num >= 1000) {
-      appState.officeSecurity.pin = String(num);
-    }
-  }
-  saveAppState();
-  broadcast({
-    type: 'office_security_updated',
-    officeSecurity: {
-      enabled: appState.officeSecurity.enabled,
-      pin: appState.officeSecurity.pin,
-    },
-  });
-  res.json({ success: true, officeSecurity: appState.officeSecurity });
-});
-
-// Upload endpoint (supports full recursive folder beaming up to 1000 files)
-app.post('/api/upload', apiLimiter, requireOfficeAuth, upload.array('files', 1000), (req, res) => {
-  if (!req.files || req.files.length === 0) {
-    return res.status(400).json({ error: 'No files uploaded' });
-  }
-
-  const uploadedFiles = req.files.map((file) => {
-    const relFromUploads = path.relative(UPLOADS_DIR, file.path).replace(/\\/g, '/');
-    const isInsideFolder = relFromUploads.includes('/');
-    const topFolder = isInsideFolder ? relFromUploads.split('/')[0] : null;
-
-    return {
-      name: file.filename,
-      originalName: file.originalname,
-      relativePath: relFromUploads,
-      folder: topFolder,
-      size: file.size,
-      mimetype: file.mimetype,
-      path: `/api/files/${relFromUploads.split('/').map(encodeURIComponent).join('/')}`,
-      fullPath: file.path,
-      uploadedAt: Date.now(),
-    };
-  });
-
-  // Broadcast WebSocket notification to all clients (throttled to 1/sec during bulk uploads)
-  broadcastFilesUploaded(uploadedFiles, req.body.sender || 'Unknown Device');
-
-  res.json({
-    success: true,
-    files: uploadedFiles,
-  });
-});
-
-// Resumable Chunked Upload for arbitrarily large files (1GB, 5GB, 10GB+)
-app.post('/api/upload-chunk', apiLimiter, requireOfficeAuth, chunkUpload.single('chunk'), async (req, res) => {
-  const safeChunksDir = path.resolve(CHUNKS_TEMP_DIR);
-  const chunkFileName = path.basename(req.file ? req.file.path : '');
-  const safeChunkPath = path.resolve(safeChunksDir, chunkFileName);
-  const isChunkValid = safeChunkPath.startsWith(safeChunksDir + path.sep);
-
-  const cleanupChunk = () => {
-    if (isChunkValid && fs.existsSync(safeChunkPath)) {
-      try { fs.unlinkSync(safeChunkPath); } catch (e) {}
-    }
-  };
-
-  try {
-    const {
-      fileId,
-      chunkIndex,
-      totalChunks,
-      filename,
-      relativePath,
-      sender
-    } = req.body;
-
-    if (!req.file || !fileId || chunkIndex === undefined || totalChunks === undefined || !filename) {
-      cleanupChunk();
-      return res.status(400).json({ error: 'Missing chunk upload parameters' });
-    }
-
-    const cIndex = parseInt(chunkIndex, 10);
-    const tChunks = parseInt(totalChunks, 10);
-
-    const ROOT = path.resolve(UPLOADS_DIR);
-    const rawTarget = String(relativePath || filename);
-    const cleanRel = path.normalize(rawTarget).replace(/\\/g, '/').replace(/^(\.\.[\/\\])+/, '').replace(/^\/+/, '');
-    const resolvedFinalPath = path.resolve(ROOT, cleanRel);
-    const rel = path.relative(ROOT, resolvedFinalPath);
-
-    // Path traversal check (strict relative & separator prefix)
-    if (!rel || rel.startsWith('..') || path.isAbsolute(rel) || !resolvedFinalPath.startsWith(ROOT + path.sep)) {
-      cleanupChunk();
-      return res.status(403).json({ error: 'Access denied: Path traversal detected' });
-    }
-
-    const targetDir = path.dirname(resolvedFinalPath);
-    const dirRel = path.relative(ROOT, targetDir);
-    if (targetDir !== ROOT && (!dirRel || dirRel.startsWith('..') || path.isAbsolute(dirRel) || !targetDir.startsWith(ROOT + path.sep))) {
-      cleanupChunk();
-      return res.status(403).json({ error: 'Access denied: Invalid directory' });
-    }
-
-    fs.mkdirSync(targetDir, { recursive: true });
-
-    const baseName = path.basename(resolvedFinalPath);
-    const safeFileId = String(fileId).replace(/[^a-zA-Z0-9_-]/g, '');
-    const resolvedTempPath = path.resolve(targetDir, `.${baseName}.${safeFileId}.part`);
-
-    if (!resolvedTempPath.startsWith(ROOT + path.sep)) {
-      cleanupChunk();
-      return res.status(403).json({ error: 'Access denied: Invalid temp path' });
-    }
-
-    // If chunk 0 and temp file already exists from an aborted session, remove it
-    if (cIndex === 0 && fs.existsSync(resolvedTempPath)) {
-      try { fs.unlinkSync(resolvedTempPath); } catch (e) {}
-    }
-
-    // Stream chunk from local disk-backed temporary file into partial assembly file
-    if (isChunkValid) {
-      await new Promise((resolve, reject) => {
-        const readStream = fs.createReadStream(safeChunkPath);
-        const writeStream = fs.createWriteStream(resolvedTempPath, { flags: 'a' });
-        readStream.on('error', reject);
-        writeStream.on('error', reject);
-        writeStream.on('finish', () => {
-          cleanupChunk();
-          resolve();
-        });
-        readStream.pipe(writeStream);
-      });
-    }
-
-    // If this is the last chunk, finalize the file!
-    if (cIndex === tChunks - 1) {
-      let finalDest = resolvedFinalPath;
-      if (fs.existsSync(finalDest)) {
-        const ext = path.extname(baseName);
-        const base = path.basename(baseName, ext);
-        finalDest = path.join(targetDir, `${base}_${Date.now()}${ext}`);
-      }
-
-      fs.renameSync(resolvedTempPath, finalDest);
-
-      const stats = fs.statSync(finalDest);
-      const relFromUploads = path.relative(UPLOADS_DIR, finalDest).replace(/\\/g, '/');
-      const isInsideFolder = relFromUploads.includes('/');
-      const topFolder = isInsideFolder ? relFromUploads.split('/')[0] : null;
-
-      const fileInfo = {
-        name: path.basename(finalDest),
-        originalName: filename,
-        relativePath: relFromUploads,
-        folder: topFolder,
-        size: stats.size,
-        mimetype: req.file.mimetype || 'application/octet-stream',
-        path: `/api/files/${relFromUploads.split('/').map(encodeURIComponent).join('/')}`,
-        fullPath: finalDest,
-        uploadedAt: Date.now(),
-      };
-
-      // Broadcast WebSocket notification to all clients (throttled to 1/sec during bulk uploads)
-      broadcastFilesUploaded([fileInfo], sender || 'Unknown Device');
-
-      return res.json({
-        success: true,
-        completed: true,
-        file: fileInfo,
-      });
-    }
-
-    // Acknowledge intermediate chunk
-    res.json({
-      success: true,
-      completed: false,
-      chunkIndex: cIndex,
-    });
-  } catch (err) {
-    cleanupChunk();
-    console.error('Error in /api/upload-chunk:', err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// =====================================================================
-// High-Speed Direct-Positioned Parallel Chunk Upload
-// Zero temp chunk files, zero concatenation pass, zero CPU thrashing
-// Chunks are written directly into target file at byte offset via pwrite
-// =====================================================================
-const activeTransfers = new Map();
-
-// Periodic reaper for abandoned/stale partial uploads
-setInterval(() => {
-  const now = Date.now();
-  for (const [id, t] of activeTransfers.entries()) {
-    if (now - t.lastActivity > 10 * 60 * 1000) {
-      try { if (t.fd) fs.closeSync(t.fd); } catch (e) {}
-      try { if (fs.existsSync(t.partPath)) fs.unlinkSync(t.partPath); } catch (e) {}
-      activeTransfers.delete(id);
-    }
-  }
-}, 60000);
-
-app.post('/api/upload-parallel', apiLimiter, requireOfficeAuth, chunkUpload.single('chunk'), async (req, res) => {
-  const safeChunksDir = path.resolve(CHUNKS_TEMP_DIR);
-  const chunkFileName = path.basename(req.file ? req.file.path : '');
-  const safeChunkPath = path.resolve(safeChunksDir, chunkFileName);
-  const isChunkValid = chunkFileName.length > 0 && safeChunkPath.startsWith(safeChunksDir + path.sep);
-
-  const cleanupTempChunk = () => {
-    if (isChunkValid && fs.existsSync(safeChunkPath)) {
-      try { fs.unlinkSync(safeChunkPath); } catch (e) {}
-    }
-  };
-
-  try {
-    const {
-      fileId,
-      chunkIndex,
-      totalChunks,
-      chunkSize,
-      filename,
-      relativePath,
-      sender,
-      fileSize,
-    } = req.body;
-
-    if (!req.file || !fileId || chunkIndex === undefined || totalChunks === undefined || !filename || !isChunkValid) {
-      cleanupTempChunk();
-      return res.status(400).json({ error: 'Missing or invalid parallel chunk upload parameters' });
-    }
-
-    const cIndex = parseInt(chunkIndex, 10);
-    const tChunks = parseInt(totalChunks, 10);
-    const cSize = parseInt(chunkSize, 10) || (16 * 1024 * 1024);
-    const safeFileId = String(fileId).replace(/[^a-zA-Z0-9_-]/g, '');
-    const position = cIndex * cSize;
-
-    let transfer = activeTransfers.get(safeFileId);
-    if (!transfer) {
-      const ROOT = path.resolve(UPLOADS_DIR);
-      const rawTarget = String(relativePath || filename);
-      const cleanRel = path.normalize(rawTarget).replace(/\\/g, '/').replace(/^(\.\.[\/\\])+/, '').replace(/^\/+/, '');
-      const resolvedFinalPath = path.resolve(ROOT, cleanRel);
-      const rel = path.relative(ROOT, resolvedFinalPath);
-
-      if (!rel || rel.startsWith('..') || path.isAbsolute(rel) || !resolvedFinalPath.startsWith(ROOT + path.sep)) {
-        cleanupTempChunk();
-        return res.status(403).json({ error: 'Access denied: Path traversal detected' });
-      }
-
-      const targetDir = path.dirname(resolvedFinalPath);
-      const dirRel = path.relative(ROOT, targetDir);
-      if (targetDir !== ROOT && (!dirRel || dirRel.startsWith('..') || path.isAbsolute(dirRel) || !targetDir.startsWith(ROOT + path.sep))) {
-        cleanupTempChunk();
-        return res.status(403).json({ error: 'Access denied: Invalid directory' });
-      }
-
-      fs.mkdirSync(targetDir, { recursive: true });
-
-      const baseName = path.basename(resolvedFinalPath);
-      const partPath = path.resolve(targetDir, `.${baseName}.${safeFileId}.part`);
-      const partRel = path.relative(ROOT, partPath);
-      if (!partRel || partRel.startsWith('..') || path.isAbsolute(partRel) || !partPath.startsWith(ROOT + path.sep)) {
-        cleanupTempChunk();
-        return res.status(403).json({ error: 'Access denied: Invalid temp path' });
-      }
-
-      // Synchronous open with atomic O_RDWR | O_CREAT guarantees single file descriptor allocation with no TOCTOU
-      const fd = fs.openSync(partPath, fs.constants.O_RDWR | fs.constants.O_CREAT);
-
-      transfer = {
-        fd,
-        targetDir,
-        baseName,
-        partPath,
-        resolvedFinalPath,
-        received: new Set(),
-        totalChunks: tChunks,
-        filename,
-        relativePath: cleanRel,
-        sender: sender || 'Unknown Device',
-        fileSize: parseInt(fileSize, 10) || 0,
-        lastActivity: Date.now(),
-      };
-      activeTransfers.set(safeFileId, transfer);
-    }
-
-    // Read chunk from disk-backed temporary file and write into .part file at specific offset
-    const chunkBuf = fs.readFileSync(safeChunkPath);
-    await new Promise((resolve, reject) => {
-      fs.write(transfer.fd, chunkBuf, 0, chunkBuf.length, position, (err) => {
-        if (err) return reject(err);
-        resolve();
-      });
-    });
-    cleanupTempChunk();
-
-    transfer.received.add(cIndex);
-    transfer.lastActivity = Date.now();
-
-    // Check if all chunks have arrived – instant finalization!
-    if (transfer.received.size >= tChunks) {
-      try {
-        fs.closeSync(transfer.fd);
-      } catch (e) {
-        console.warn('Error closing fd on completion:', e);
-      }
-      activeTransfers.delete(safeFileId);
-
-      let finalDest = transfer.resolvedFinalPath;
-      const isInsideFolder = transfer.relativePath.includes('/');
-      if (fs.existsSync(finalDest)) {
-        if (!isInsideFolder) {
-          const ext = path.extname(transfer.baseName);
-          const base = path.basename(transfer.baseName, ext);
-          finalDest = path.join(transfer.targetDir, `${base}_${Date.now()}${ext}`);
-        } else {
-          try { fs.unlinkSync(finalDest); } catch (e) {}
-        }
-      }
-
-      fs.renameSync(transfer.partPath, finalDest);
-
-      const stats = fs.statSync(finalDest);
-      const relFromUploads = path.relative(UPLOADS_DIR, finalDest).replace(/\\/g, '/');
-      const topFolder = isInsideFolder ? relFromUploads.split('/')[0] : null;
-
-      const fileInfo = {
-        name: path.basename(finalDest),
-        originalName: transfer.filename,
-        relativePath: relFromUploads,
-        folder: topFolder,
-        size: stats.size,
-        mimetype: req.file.mimetype || 'application/octet-stream',
-        path: `/api/files/${relFromUploads.split('/').map(encodeURIComponent).join('/')}`,
-        fullPath: finalDest,
-        uploadedAt: Date.now(),
-      };
-
-      broadcastFilesUploaded([fileInfo], transfer.sender);
-
-      return res.json({
-        success: true,
-        completed: true,
-        file: fileInfo,
-      });
-    }
-
-    // Acknowledge intermediate chunk
-    res.json({
-      success: true,
-      completed: false,
-      chunkIndex: cIndex,
-      receivedCount: transfer.received.size,
-      totalChunks: tChunks,
-    });
-  } catch (err) {
-    cleanupTempChunk();
-    console.error('Error in /api/upload-parallel:', err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// =====================================================================
-// Ranged File Download – supports HTTP Range requests for parallel download
-// Frontend can request multiple byte ranges simultaneously for faster transfers
-// =====================================================================
-app.get(/^\/api\/files-ranged\/(.*)/, apiLimiter, requireOfficeAuth, (req, res) => {
-  const reqPath = decodeURIComponent(req.params[0] || '');
-  const ROOT = path.resolve(UPLOADS_DIR);
-  const cleanPath = path.normalize(reqPath).replace(/\\/g, '/').replace(/^(\.\.[\/\\])+/, '').replace(/^\/+/, '');
-  const filePath = path.resolve(ROOT, cleanPath);
-  const rel = path.relative(ROOT, filePath);
-
-  // Path traversal check (strict relative & separator prefix)
-  if (!rel || rel.startsWith('..') || path.isAbsolute(rel) || !filePath.startsWith(ROOT + path.sep)) {
-    return res.status(403).json({ error: 'Forbidden' });
-  }
-
-  if (!fs.existsSync(filePath)) {
-    return res.status(404).json({ error: 'File not found' });
-  }
-
-  const stat = fs.statSync(filePath);
-  if (!stat.isFile()) {
-    return res.status(400).json({ error: 'Not a file' });
-  }
-
-  const fileSize = stat.size;
-  const filename = path.basename(filePath);
-
-  // Always set these headers
-  res.setHeader('Accept-Ranges', 'bytes');
-  res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"; filename*=UTF-8''${encodeURIComponent(filename)}`);
-  res.setHeader('Cache-Control', 'private, max-age=86400, no-transform');
-  res.setHeader('X-Content-Type-Options', 'nosniff');
-
-  const rangeHeader = req.headers.range;
-  if (rangeHeader) {
-    // Parse Range header: "bytes=start-end"
-    const match = rangeHeader.match(/bytes=(\d+)-(\d*)/);
-    if (!match) {
-      res.setHeader('Content-Range', `bytes */${fileSize}`);
-      return res.status(416).json({ error: 'Invalid Range header' });
-    }
-
-    const start = parseInt(match[1], 10);
-    const end = match[2] ? parseInt(match[2], 10) : fileSize - 1;
-
-    if (start >= fileSize || end >= fileSize || start > end) {
-      res.setHeader('Content-Range', `bytes */${fileSize}`);
-      return res.status(416).json({ error: 'Range Not Satisfiable' });
-    }
-
-    const contentLength = end - start + 1;
-    res.status(206);
-    res.setHeader('Content-Range', `bytes ${start}-${end}/${fileSize}`);
-    res.setHeader('Content-Length', contentLength);
-    res.setHeader('Content-Type', 'application/octet-stream');
-
-    const stream = fs.createReadStream(filePath, { start, end, highWaterMark: 4 * 1024 * 1024 });
-    stream.pipe(res);
-  } else {
-    // No Range header – serve full file with Content-Length
-    res.setHeader('Content-Length', fileSize);
-    res.setHeader('Content-Type', 'application/octet-stream');
-    const stream = fs.createReadStream(filePath, { highWaterMark: 4 * 1024 * 1024 });
-    stream.pipe(res);
-  }
-});
-
-// Instant Camera Snap upload via multipart form-data (multer diskStorage)
-app.post('/api/upload-snap', apiLimiter, requireOfficeAuth, upload.single('file'), (req, res) => {
-  try {
-    if (!req.file) {
-      return res.status(400).json({ error: 'No image uploaded' });
-    }
-
-    const fileInfo = {
-      name: req.file.filename,
-      originalName: req.file.originalname,
-      size: req.file.size,
-      mimetype: req.file.mimetype || 'image/jpeg',
-      path: `/api/files/${encodeURIComponent(req.file.filename)}`,
-      fullPath: req.file.path,
-      uploadedAt: Date.now(),
-      isSnap: true,
-      note: req.body.note || '',
-    };
-
-    // Play camera snap sound if available
-    if (isMac) {
-      execFile('afplay', ['/System/Library/Components/CoreAudio.component/Contents/SharedSupport/SystemSounds/system/payment_success.caf'], (err) => {
-        if (err) execFile('afplay', ['/System/Library/Sounds/Ping.aiff'], () => {});
-      });
-    }
-
-    cachedFilesList = null;
-    broadcast({
-      type: 'files_uploaded',
-      files: [fileInfo],
-      sender: req.body.sender || 'Mobile Camera',
-    });
-
-    res.json({ success: true, file: fileInfo });
-  } catch (err) {
-    console.error('[Snap Upload Error]', err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// List files and folders in transfer directory (with 2-second high-throughput caching)
-
-app.get('/api/files', apiLimiter, requireOfficeAuth, (req, res) => {
-  const now = Date.now();
-  if (cachedFilesList && (now - lastFilesListTime < 2000)) {
-    return res.json({ files: cachedFilesList });
-  }
-
-  fs.readdir(UPLOADS_DIR, (err, items) => {
-    if (err) {
-      return res.status(500).json({ error: 'Failed to read directory' });
-    }
-
-    const files = [];
-    for (const item of items) {
-      if (item.startsWith('.')) continue; // ignore hidden files like .DS_Store, .airbridge_state.json
-      const fullPath = path.join(UPLOADS_DIR, item);
-      try {
-        const stats = fs.statSync(fullPath);
-        if (stats.isDirectory()) {
-          const dirStats = getDirectoryStats(fullPath);
-          files.push({
-            name: item,
-            isDirectory: true,
-            fileCount: dirStats.count,
-            size: dirStats.totalBytes,
-            modifiedAt: stats.mtimeMs,
-            path: `/api/download-folder/${encodeURIComponent(item)}`,
-          });
-        } else if (stats.isFile()) {
-          files.push({
-            name: item,
-            isDirectory: false,
-            size: stats.size,
-            modifiedAt: stats.mtimeMs,
-            path: `/api/files/${encodeURIComponent(item)}`,
-          });
-        }
-      } catch (e) {
-        // file could have been removed concurrently
-      }
-    }
-
-    // Sort newest first
-    files.sort((a, b) => b.modifiedAt - a.modifiedAt);
-    cachedFilesList = files;
-    lastFilesListTime = now;
-    res.json({ files });
-  });
-});
-
-// Download single file or file nested inside a folder with secure headers
-app.get(/^\/api\/files\/(.*)/, apiLimiter, requireOfficeAuth, (req, res) => {
-  const reqPath = decodeURIComponent(req.params[0] || '');
-  const ROOT = path.resolve(UPLOADS_DIR);
-  const cleanPath = path.normalize(reqPath).replace(/\\/g, '/').replace(/^(\.\.[\/\\])+/, '').replace(/^\/+/, '');
-  const filePath = path.resolve(ROOT, cleanPath);
-  const rel = path.relative(ROOT, filePath);
-
-  // Path traversal check (strict relative & separator prefix)
-  if (!rel || rel.startsWith('..') || path.isAbsolute(rel) || !filePath.startsWith(ROOT + path.sep)) {
-    return res.status(403).json({ error: 'Forbidden' });
-  }
-
-  if (!fs.existsSync(filePath)) {
-    return res.status(404).json({ error: 'File not found' });
-  }
-
-  const filename = path.basename(filePath);
-  const stat = fs.statSync(filePath);
-  if (!stat.isFile()) {
-    return res.status(400).json({ error: 'Not a file' });
-  }
-
-  const fileSize = stat.size;
-  res.setHeader('Accept-Ranges', 'bytes');
-  res.setHeader('Content-Type', 'application/octet-stream');
-  res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"; filename*=UTF-8''${encodeURIComponent(filename)}`);
-  res.setHeader('Cache-Control', 'private, max-age=86400, no-transform');
-  res.setHeader('X-Content-Type-Options', 'nosniff');
-
-  const rangeHeader = req.headers.range;
-  if (rangeHeader) {
-    const match = rangeHeader.match(/bytes=(\d+)-(\d*)/);
-    if (!match) {
-      res.setHeader('Content-Range', `bytes */${fileSize}`);
-      return res.status(416).json({ error: 'Invalid Range header' });
-    }
-
-    const start = parseInt(match[1], 10);
-    const end = match[2] ? parseInt(match[2], 10) : fileSize - 1;
-
-    if (start >= fileSize || end >= fileSize || start > end) {
-      res.setHeader('Content-Range', `bytes */${fileSize}`);
-      return res.status(416).json({ error: 'Range Not Satisfiable' });
-    }
-
-    const contentLength = end - start + 1;
-    res.status(206);
-    res.setHeader('Content-Range', `bytes ${start}-${end}/${fileSize}`);
-    res.setHeader('Content-Length', contentLength);
-
-    const stream = fs.createReadStream(filePath, { start, end, highWaterMark: 4 * 1024 * 1024 });
-    stream.pipe(res);
-  } else {
-    res.setHeader('Content-Length', fileSize);
-    const stream = fs.createReadStream(filePath, { highWaterMark: 4 * 1024 * 1024 });
-    stream.pipe(res);
-  }
-});
-
-// Stream or view raw file
-app.get(/^\/api\/files-raw\/(.*)/, apiLimiter, requireOfficeAuth, (req, res) => {
-  const reqPath = decodeURIComponent(req.params[0] || '');
-  const ROOT = path.resolve(UPLOADS_DIR);
-  const cleanPath = path.normalize(reqPath).replace(/\\/g, '/').replace(/^(\.\.[\/\\])+/, '').replace(/^\/+/, '');
-  const filePath = path.resolve(ROOT, cleanPath);
-  const rel = path.relative(ROOT, filePath);
-
-  // Path traversal check (strict relative & separator prefix)
-  if (!rel || rel.startsWith('..') || path.isAbsolute(rel) || !filePath.startsWith(ROOT + path.sep)) {
-    return res.status(403).json({ error: 'Forbidden' });
-  }
-
-  if (!fs.existsSync(filePath)) {
-    return res.status(404).json({ error: 'File not found' });
-  }
-
-  res.sendFile(filePath);
-});
-
-// Download entire folder as a ZIP archive on demand (instant native C zip streaming at line rate)
-app.get(/^\/api\/download-folder\/(.*)/, apiLimiter, requireOfficeAuth, (req, res) => {
-  const folderRelPath = decodeURIComponent(req.params[0] || '');
-  const ROOT = path.resolve(UPLOADS_DIR);
-  const cleanRel = path.normalize(folderRelPath).replace(/\\/g, '/').replace(/^(\.\.[\/\\])+/, '').replace(/^\/+/, '');
-  const folderPath = path.resolve(ROOT, cleanRel);
-  const rel = path.relative(ROOT, folderPath);
-
-  // Path traversal check (strict relative & separator prefix)
-  if (!rel || rel.startsWith('..') || path.isAbsolute(rel) || !folderPath.startsWith(ROOT + path.sep)) {
-    return res.status(403).json({ error: 'Access denied: Invalid folder path' });
-  }
-
-  if (!fs.existsSync(folderPath)) {
-    return res.status(404).json({ error: 'Folder not found' });
-  }
-
-  const stat = fs.statSync(folderPath);
-  if (!stat.isDirectory()) {
-    return res.status(400).json({ error: 'Not a directory' });
-  }
-
-  const folderName = path.basename(folderPath);
-  res.setHeader('Content-Type', 'application/zip');
-  res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(folderName)}.zip"; filename*=UTF-8''${encodeURIComponent(folderName)}.zip`);
-  res.setHeader('Cache-Control', 'private, max-age=86400, no-transform');
-  res.setHeader('X-Content-Type-Options', 'nosniff');
-
-  const zipBinary = fs.existsSync('/usr/bin/zip') ? '/usr/bin/zip' : (fs.existsSync('/usr/local/bin/zip') ? '/usr/local/bin/zip' : null);
-
-  if (zipBinary) {
-    const parentDir = path.dirname(folderPath);
-    const parentRel = path.relative(ROOT, parentDir);
-    if (parentDir !== ROOT && (!parentRel || parentRel.startsWith('..') || path.isAbsolute(parentRel) || !parentDir.startsWith(ROOT + path.sep))) {
-      return res.status(403).json({ error: 'Access denied: Invalid parent path' });
-    }
-    const targetDirName = path.basename(folderPath);
-
-    const zipProcess = spawn(zipBinary, ['-0', '-q', '-r', '-', targetDirName], {
-      cwd: parentDir,
-      stdio: ['ignore', 'pipe', 'pipe']
-    });
-
-    zipProcess.stdout.pipe(res);
-
-    req.on('close', () => {
-      if (!zipProcess.killed) {
-        try { zipProcess.kill('SIGTERM'); } catch (e) {}
-      }
-    });
-
-    zipProcess.on('error', (err) => {
-      console.error('[Native Zip Error]:', err);
-      if (!res.headersSent) {
-        res.status(500).json({ error: 'Failed to stream folder archive' });
-      }
-    });
-  } else {
-    const archive = new ZipArchive({ zlib: { level: 0 }, highWaterMark: 4 * 1024 * 1024 });
-    archive.on('error', (err) => {
-      if (!res.headersSent) res.status(500).send({ error: err.message });
-    });
-    archive.pipe(res);
-    archive.directory(folderPath, folderName);
-    archive.finalize();
-  }
-});
-
-// Download all files as a ZIP archive (instant native C zip streaming)
-app.get('/api/download-zip', apiLimiter, requireOfficeAuth, (req, res) => {
-  res.setHeader('Content-Type', 'application/zip');
-  res.setHeader('Content-Disposition', 'attachment; filename="AirBridge_Files.zip"');
-  res.setHeader('Cache-Control', 'private, max-age=86400, no-transform');
-  res.setHeader('X-Content-Type-Options', 'nosniff');
-
-  const zipBinary = fs.existsSync('/usr/bin/zip') ? '/usr/bin/zip' : (fs.existsSync('/usr/local/bin/zip') ? '/usr/local/bin/zip' : null);
-
-  if (zipBinary) {
-    const zipProcess = spawn(zipBinary, ['-0', '-q', '-r', '-', '.', '-x', '.*', '*/.*', '.chunks_temp/*'], {
-      cwd: UPLOADS_DIR,
-      stdio: ['ignore', 'pipe', 'pipe']
-    });
-
-    zipProcess.stdout.pipe(res);
-
-    req.on('close', () => {
-      if (!zipProcess.killed) {
-        try { zipProcess.kill('SIGTERM'); } catch (e) {}
-      }
-    });
-
-    zipProcess.on('error', (err) => {
-      console.error('[Native Zip All Error]:', err);
-      if (!res.headersSent) {
-        res.status(500).json({ error: 'Failed to stream files archive' });
-      }
-    });
-  } else {
-    const archive = new ZipArchive({ zlib: { level: 0 }, highWaterMark: 4 * 1024 * 1024 });
-    archive.on('error', (err) => {
-      if (!res.headersSent) res.status(500).send({ error: err.message });
-    });
-    archive.pipe(res);
-    archive.directory(UPLOADS_DIR, false);
-    archive.finalize();
-  }
-});
-
-// Safe deletion function for files and entire folders
-function deleteFileOrDirectory(targetName) {
-  if (!targetName || typeof targetName !== 'string') {
-    throw new Error('Invalid filename');
-  }
-
-  const ROOT = path.resolve(UPLOADS_DIR);
-  const cleanTarget = path.normalize(targetName).replace(/\\/g, '/').replace(/^(\.\.[\/\\])+/, '').replace(/^\/+/, '');
-  const targetPath = path.resolve(ROOT, cleanTarget);
-  const rel = path.relative(ROOT, targetPath);
-
-  // Security: prevent path traversal outside UPLOADS_DIR
-  if (!rel || rel.startsWith('..') || path.isAbsolute(rel) || targetPath === ROOT || !targetPath.startsWith(ROOT + path.sep)) {
-    throw new Error('Access denied: cannot delete outside root uploads folder');
-  }
-
-  if (!fs.existsSync(targetPath)) {
-    return false;
-  }
-
-  // fs.rmSync removes both files and directories recursively on modern Node
-  fs.rmSync(targetPath, { recursive: true, force: true });
-  return true;
-}
-
-// Delete a file or directory (supports DELETE and POST with JSON body for maximum client compatibility)
-const handleDeleteFileRequest = (req, res) => {
-  if (!isAuthorizedRequest(req)) {
-    return res.status(401).json({ error: 'Office Space is protected by Room PIN', officeSecurity: true });
-  }
-
-  let filename = '';
-  if (req.body && req.body.filename) {
-    filename = req.body.filename;
-  } else if (req.params && req.params.filename) {
-    const raw = req.params.filename;
-    filename = Array.isArray(raw) ? raw.join('/') : raw;
-  } else if (req.params && req.params[0]) {
-    filename = decodeURIComponent(req.params[0]);
-  }
-
-  if (!filename || typeof filename !== 'string') {
-    return res.status(400).json({ error: 'Filename is required' });
-  }
-
-  try {
-    const deleted = deleteFileOrDirectory(filename);
-    if (deleted) {
-      console.log('[Vault] Successfully deleted file');
-      cachedFilesList = null;
-      broadcast({ type: 'file_deleted', filename });
-      return res.json({ success: true, filename });
-    }
-    return res.status(404).json({ error: 'File or directory not found' });
-  } catch (err) {
-    console.error('[Vault Error] Failed to delete file');
-    return res.status(500).json({ error: err.message || 'Failed to delete file or folder' });
-  }
-};
-
-app.delete(/^\/api\/files\/(.*)/, apiLimiter, handleDeleteFileRequest);
-app.delete('/api/files/{*filename}', apiLimiter, handleDeleteFileRequest);
-app.post('/api/files/delete', apiLimiter, handleDeleteFileRequest);
-
-function openPathInSystemFileManager(targetPath, isDirectory, res) {
-  if (isWindows) {
-    const explorerArgs = isDirectory ? [targetPath] : [`/select,${targetPath}`];
-    execFile('explorer.exe', explorerArgs, (err) => {
-      if (err && err.code !== 1) {
-        return res.status(500).json({ error: 'Failed to reveal in File Explorer' });
-      }
-      res.json({ success: true, opened: path.basename(targetPath), platform: 'windows' });
-    });
-  } else if (isMac) {
-    const openArgs = isDirectory ? [targetPath] : ['-R', targetPath];
-    execFile('open', openArgs, (err) => {
-      if (err) {
-        return res.status(500).json({ error: 'Failed to reveal in Finder' });
-      }
-      res.json({ success: true, opened: path.basename(targetPath), platform: 'macos' });
-    });
-  } else {
-    const dirToOpen = isDirectory ? targetPath : path.dirname(targetPath);
-    execFile('xdg-open', [dirToOpen], (err) => {
-      if (err) {
-        return res.status(500).json({ error: 'Failed to reveal file' });
-      }
-      res.json({ success: true, opened: path.basename(targetPath), platform: 'linux' });
-    });
-  }
-}
-
-// Reveal file or directory in Windows File Explorer, macOS Finder, or Linux File Manager
-const handleRevealInFileManager = (req, res) => {
-  const ROOT = path.resolve(UPLOADS_DIR);
-  const rawFilename = (req.body && typeof req.body.filename === 'string') ? req.body.filename.trim() : '';
-
-  if (!rawFilename) {
-    return openPathInSystemFileManager(ROOT, true, res);
-  }
-
-  // Strict path traversal containment
-  if (rawFilename.includes('..') || path.isAbsolute(rawFilename)) {
-    return res.status(403).json({ error: 'Access denied: Invalid path' });
-  }
-
-  const cleanFilename = path.normalize(rawFilename).replace(/\\/g, '/').replace(/^\/+/, '');
-  const targetPath = path.resolve(ROOT, cleanFilename);
-  const rel = path.relative(ROOT, targetPath);
-
-  if (!rel || rel.startsWith('..') || path.isAbsolute(rel) || !targetPath.startsWith(ROOT + path.sep)) {
-    return res.status(403).json({ error: 'Access denied: Invalid path' });
-  }
-
-  if (!fs.existsSync(targetPath)) {
-    return res.status(404).json({ error: 'Target path does not exist' });
-  }
-
-  const isDirectory = fs.statSync(targetPath).isDirectory();
-  return openPathInSystemFileManager(targetPath, isDirectory, res);
-};
-
-app.post('/api/open-in-finder', apiLimiter, requireOfficeAuth, handleRevealInFileManager);
-app.post('/api/reveal-file', apiLimiter, requireOfficeAuth, handleRevealInFileManager);
-
-// Open URL on host default browser
-app.post('/api/open-url', apiLimiter, requireOfficeAuth, (req, res) => {
-  const { url } = req.body;
-  if (!url || typeof url !== 'string') return res.status(400).json({ error: 'No URL provided' });
-
-  let parsedUrl;
-  try {
-    parsedUrl = new URL(url);
-  } catch {
-    return res.status(400).json({ error: 'Invalid URL format' });
-  }
-
-  // Restrict to safe web protocols
-  if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
-    return res.status(400).json({ error: 'Only HTTP and HTTPS URLs are permitted' });
-  }
-
-  if (isWindows) {
-    execFile('rundll32.exe', ['url.dll,FileProtocolHandler', parsedUrl.href], (err) => {
-      if (err) return res.status(500).json({ error: 'Failed to open URL' });
-      res.json({ success: true, opened: parsedUrl.href, platform: 'windows' });
-    });
-  } else if (isMac) {
-    execFile('open', ['--', parsedUrl.href], (err) => {
-      if (err) return res.status(500).json({ error: 'Failed to open URL' });
-      res.json({ success: true, opened: parsedUrl.href, platform: 'macos' });
-    });
-  } else {
-    execFile('xdg-open', [parsedUrl.href], (err) => {
-      if (err) return res.status(500).json({ error: 'Failed to open URL' });
-      res.json({ success: true, opened: parsedUrl.href, platform: 'linux' });
-    });
-  }
-});
-
-// Get chat history
-app.get('/api/chat', apiLimiter, requireOfficeAuth, (req, res) => {
-  res.json({ messages: appState.chatHistory });
-});
-
-// Clear chat history
-app.post('/api/chat/clear', apiLimiter, requireOfficeAuth, (req, res) => {
-  appState.chatHistory = [];
-  saveAppState();
-  broadcast({ type: 'chat_cleared' });
-  res.json({ success: true });
-});
-
-// Get clipboard history
-app.get('/api/clipboard', apiLimiter, requireOfficeAuth, (req, res) => {
-  res.json({ items: appState.clipboardHistory });
-});
-
-// Clear clipboard history
-app.post('/api/clipboard/clear', apiLimiter, requireOfficeAuth, (req, res) => {
-  appState.clipboardHistory = [];
-  saveAppState();
-  broadcast({ type: 'clipboard_cleared' });
-  res.json({ success: true });
-});
+// Middleware for routes requiring Office PIN authorization
+const requireOfficeAuth = createRequireOfficeAuth(() => stateStore.getState());
+
+// Wire modular routes
+app.use('/api', createInfoRouter({
+  getNetworkIps,
+  PORT,
+  getSanitizedHostname,
+  isWindows,
+  isMac,
+  isLinux,
+  getSanitizedDownloadsDir,
+  getUniqueDevices,
+  stateStore,
+  getHostBattery,
+}));
+
+app.use('/api/office', createOfficeRouter({
+  stateStore,
+  broadcast,
+}));
+
+app.use('/api/chat', requireOfficeAuth, createChatRouter({
+  stateStore,
+  broadcast,
+}));
+
+app.use('/api/clipboard', requireOfficeAuth, createClipboardRouter({
+  stateStore,
+  broadcast,
+}));
+
+app.use('/api', requireOfficeAuth, createFilesRouter({
+  UPLOADS_DIR,
+  CHUNKS_TEMP_DIR,
+  upload,
+  chunkUpload,
+  broadcastFilesUploaded,
+  broadcast,
+  isMac,
+  isWindows,
+  isLinux,
+}));
 
 // Serve frontend in production (static build)
 const publicDir = path.join(__dirname, 'public');
@@ -1789,7 +771,7 @@ if (fs.existsSync(publicDir)) {
   });
 }
 
-// Global Express error handler (absorbs client aborts and network resets cleanly)
+// Global Express error handler
 app.use((err, req, res, next) => {
   if (err && (err.message === 'Request aborted' || err.code === 'ECONNRESET' || err.type === 'request.aborted')) {
     return res.status(499).end();
@@ -1800,10 +782,36 @@ app.use((err, req, res, next) => {
   }
 });
 
-// A fatal listen failure (port in use, permission denied)
+// Graceful shutdown helper
+function gracefulShutdown(exitCode = 1) {
+  console.log('[AirBridge Server] Initiating clean shutdown...');
+  try {
+    server.close(() => {
+      console.log('[AirBridge Server] HTTP server closed.');
+      process.exit(exitCode);
+    });
+    // Force exit if close hangs
+    setTimeout(() => {
+      process.exit(exitCode);
+    }, 3000).unref();
+  } catch (_) {
+    process.exit(exitCode);
+  }
+}
+
+// Global safety guards: Do NOT swallow arbitrary errors and run in zombie state!
+process.on('uncaughtException', (err) => {
+  console.error('[AirBridge Server] Fatal Uncaught Exception:', err);
+  gracefulShutdown(1);
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error('[AirBridge Server] Fatal Unhandled Rejection:', reason);
+  gracefulShutdown(1);
+});
+
 function failToStart(err) {
   if (err && err.code === 'EADDRINUSE') {
-    // Check if AirBridge is already running in the background on this port
     const req = http.get(`http://localhost:${PORT}/api/info`, (res) => {
       let raw = '';
       res.on('data', (chunk) => { raw += chunk; });
@@ -1845,45 +853,49 @@ function failToStart(err) {
   console.error(`[AirBridge Server] Failed to start on port ${PORT}:`, err && err.message ? err.message : err);
   process.exit(1);
 }
+
 server.on('error', failToStart);
 
-// Start Server (sync listen throws are caught; async failures hit 'error' above)
-try {
-server.listen(PORT, '0.0.0.0', () => {
-  const net = getNetworkIps();
-  const primaryUrl = `http://${net.primaryIp}:${PORT}`;
-  const localUrl = `http://localhost:${PORT}`;
-  const hostPlatform = isWindows ? 'Windows' : isMac ? 'macOS' : 'Linux';
+// Start Server if invoked directly
+if (require.main === module) {
+  try {
+    server.listen(PORT, '0.0.0.0', () => {
+      const net = getNetworkIps();
+      const primaryUrl = `http://${net.primaryIp}:${PORT}`;
+      const localUrl = `http://localhost:${PORT}`;
+      const hostPlatform = isWindows ? 'Windows' : isMac ? 'macOS' : 'Linux';
 
-  console.log('\n============================================================');
-  console.log('   AirBridge: Multi-Device LAN & Office Connection Running  ');
-  console.log('============================================================');
-  console.log(`\n  Host (${hostPlatform}):     ${localUrl}`);
-  console.log(`  Office / Mobile Devices: ${primaryUrl}`);
-  console.log(`  Save Directory:          ${UPLOADS_DIR}\n`);
-  console.log('  Scan this QR Code with your phone camera to connect:\n');
+      console.log('\n============================================================');
+      console.log('   AirBridge: Multi-Device LAN & Office Connection Running  ');
+      console.log('============================================================');
+      console.log(`\n  Host (${hostPlatform}):     ${localUrl}`);
+      console.log(`  Office / Mobile Devices: ${primaryUrl}`);
+      console.log(`  Save Directory:          ${UPLOADS_DIR}\n`);
+      console.log('  Scan this QR Code with your phone camera to connect:\n');
 
-  qrcodeTerminal.generate(primaryUrl, { small: true });
+      qrcodeTerminal.generate(primaryUrl, { small: true });
 
-  console.log('\n============================================================\n');
+      console.log('\n============================================================\n');
 
-  // Auto-open browser on host if launched interactively
-  if (process.env.AUTO_OPEN !== 'false') {
-    if (isWindows) {
-      execFile('rundll32.exe', ['url.dll,FileProtocolHandler', localUrl], (err) => {
-        if (err) console.log('Notice: auto-open browser skipped');
-      });
-    } else if (isMac) {
-      execFile('open', ['--', localUrl], (err) => {
-        if (err) console.log('Notice: auto-open browser skipped');
-      });
-    } else if (isLinux) {
-      execFile('xdg-open', [localUrl], (err) => {
-        if (err) console.log('Notice: auto-open browser skipped');
-      });
-    }
+      if (process.env.AUTO_OPEN !== 'false') {
+        if (isWindows) {
+          execFile('rundll32.exe', ['url.dll,FileProtocolHandler', localUrl], () => {});
+        } else if (isMac) {
+          execFile('open', ['--', localUrl], () => {});
+        } else if (isLinux) {
+          execFile('xdg-open', [localUrl], () => {});
+        }
+      }
+    });
+  } catch (err) {
+    failToStart(err);
   }
-});
-} catch (err) {
-  failToStart(err);
 }
+
+module.exports = {
+  app,
+  server,
+  stateStore,
+  BOOT_HOST_SECRET,
+  UPLOADS_DIR,
+};

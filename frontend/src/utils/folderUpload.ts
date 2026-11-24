@@ -4,6 +4,19 @@ export interface TraversedFile {
 }
 
 /**
+ * Splits an array of items into batches of at most batchSize.
+ * Prevents exceeding server multipart limits while keeping high LAN throughput.
+ */
+export function chunkFileArray<T>(items: T[], batchSize = 200): T[][] {
+  if (!items || items.length === 0) return [];
+  const batches: T[][] = [];
+  for (let i = 0; i < items.length; i += batchSize) {
+    batches.push(items.slice(i, i + batchSize));
+  }
+  return batches;
+}
+
+/**
  * Recursively scans files and directories from DataTransfer items (drag and drop)
  * using the HTML5 FileSystem API (webkitGetAsEntry).
  * Reads full binary files without dropping or filtering any files.
