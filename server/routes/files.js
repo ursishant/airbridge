@@ -902,6 +902,51 @@ function createFilesRouter(options) {
     }
   };
 
+  // Bulk / Batch Delete Endpoint
+  const handleBulkDeleteFilesRequest = (req, res) => {
+    const rawFiles = req.body && req.body.filenames;
+    if (!Array.isArray(rawFiles) || rawFiles.length === 0) {
+      return res.status(400).json({ error: 'Array of filenames is required' });
+    }
+
+    const state = stateStore.getState();
+    const deleted = [];
+    const errors = [];
+
+    for (const name of rawFiles) {
+      if (typeof name !== 'string' || !name.trim()) continue;
+      try {
+        const ok = deleteFileOrDirectory(name.trim());
+        if (ok) {
+          deleted.push(name.trim());
+          if (state.targetedFiles && state.targetedFiles[name.trim()]) {
+            delete state.targetedFiles[name.trim()];
+          }
+          broadcast({ type: 'file_deleted', filename: name.trim() });
+        } else {
+          errors.push({ filename: name, error: 'Not found' });
+        }
+      } catch (err) {
+        errors.push({ filename: name, error: err.message });
+      }
+    }
+
+    if (deleted.length > 0) {
+      invalidateCache();
+      stateStore.save();
+    }
+
+    return res.json({
+      success: true,
+      deletedCount: deleted.length,
+      deleted,
+      errors,
+    });
+  };
+
+  router.post('/files/bulk-delete', handleBulkDeleteFilesRequest);
+  router.delete('/files/bulk-delete', handleBulkDeleteFilesRequest);
+
   router.delete(/^\/files\/(.*)/, handleDeleteFileRequest);
   router.delete('/files/{*filename}', handleDeleteFileRequest);
   router.post('/files/delete', handleDeleteFileRequest);

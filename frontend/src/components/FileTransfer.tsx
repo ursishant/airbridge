@@ -13,7 +13,10 @@ import {
   Search,
   LayoutGrid,
   List,
-  CheckCircle2
+  CheckCircle2,
+  CheckSquare,
+  Square,
+  MinusSquare,
 } from 'lucide-react';
 import type { UploadedFileItem, ServerInfo } from '../hooks/useWebSocket';
 import { M3FolderIcon, M3DocumentIcon } from './M3Icons';
@@ -65,6 +68,9 @@ export const FileTransfer: React.FC<FileTransferProps> = ({
   const [activeCategory, setActiveCategory] = useState<FilterCategory>('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [deleteTarget, setDeleteTarget] = useState<{ name: string; isDirectory?: boolean } | null>(null);
+  const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set());
+  const [isBulkDeleting, setIsBulkDeleting] = useState(false);
+  const [showBulkConfirm, setShowBulkConfirm] = useState(false);
 
   const fetchFiles = async () => {
     try {
@@ -144,6 +150,58 @@ export const FileTransfer: React.FC<FileTransferProps> = ({
       }
     } catch (e) {
       showToast('Failed to delete file');
+    }
+  };
+
+  const toggleSelectFile = (filename: string) => {
+    setSelectedFiles((prev) => {
+      const next = new Set(prev);
+      if (next.has(filename)) {
+        next.delete(filename);
+      } else {
+        next.add(filename);
+      }
+      return next;
+    });
+  };
+
+  const toggleSelectAll = () => {
+    if (selectedFiles.size === filteredFiles.length && filteredFiles.length > 0) {
+      setSelectedFiles(new Set());
+    } else {
+      setSelectedFiles(new Set(filteredFiles.map((f) => f.name)));
+    }
+  };
+
+  const executeBulkDelete = async () => {
+    if (selectedFiles.size === 0) return;
+    setIsBulkDeleting(true);
+    const toDelete = Array.from(selectedFiles);
+    try {
+      const pin = getPin();
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (pin) headers['x-airbridge-pin'] = pin;
+
+      const res = await fetch('/api/files/bulk-delete', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ filenames: toDelete }),
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        showToast(`Successfully deleted ${data.deletedCount || toDelete.length} item(s)`);
+        setAllFiles((prev) => prev.filter((f) => !selectedFiles.has(f.name)));
+        setSelectedFiles(new Set());
+        fetchFiles();
+      } else {
+        showToast('Failed to bulk delete items');
+      }
+    } catch (e) {
+      showToast('Error during bulk deletion');
+    } finally {
+      setIsBulkDeleting(false);
+      setShowBulkConfirm(false);
     }
   };
 
@@ -387,6 +445,57 @@ export const FileTransfer: React.FC<FileTransferProps> = ({
         </div>
       </div>
 
+      {/* 2.5 Bulk Selection & Actions Bar */}
+      {filteredFiles.length > 0 && (
+        <div className="flex items-center justify-between gap-3 px-3.5 py-2 rounded-2xl bg-black/[0.03] dark:bg-white/[0.04] border border-black/[0.04] dark:border-white/[0.06] transition-all">
+          <div className="flex items-center gap-2">
+            <button
+              onClick={toggleSelectAll}
+              className="apple-press flex items-center gap-2 text-xs font-semibold text-[#64748B] hover:text-[#0F1115] dark:text-[#94A3B8] dark:hover:text-white transition-colors"
+              title={selectedFiles.size === filteredFiles.length ? 'Deselect all' : 'Select all'}
+            >
+              {selectedFiles.size === filteredFiles.length && filteredFiles.length > 0 ? (
+                <CheckSquare className="w-4 h-4 text-[#0071E3] dark:text-[#C6F432]" />
+              ) : selectedFiles.size > 0 ? (
+                <MinusSquare className="w-4 h-4 text-[#0071E3] dark:text-[#C6F432]" />
+              ) : (
+                <Square className="w-4 h-4" />
+              )}
+              <span>
+                {selectedFiles.size === filteredFiles.length && filteredFiles.length > 0
+                  ? 'All Selected'
+                  : selectedFiles.size > 0
+                  ? `${selectedFiles.size} of ${filteredFiles.length} selected`
+                  : 'Select All'}
+              </span>
+            </button>
+          </div>
+
+          {selectedFiles.size > 0 && (
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setSelectedFiles(new Set())}
+                className="text-xs font-medium text-[#64748B] hover:text-[#0F1115] dark:text-[#94A3B8] dark:hover:text-white transition-colors px-2 py-1"
+              >
+                Clear
+              </button>
+              <button
+                onClick={() => setShowBulkConfirm(true)}
+                disabled={isBulkDeleting}
+                className="apple-press flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-red-500 hover:bg-red-600 text-white shadow-sm transition-all disabled:opacity-50"
+              >
+                {isBulkDeleting ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Trash2 className="w-3.5 h-3.5" />
+                )}
+                <span>Delete Selected ({selectedFiles.size})</span>
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* 3. Slab Body: Balanced 2-Column Split (Files Stream on Left, Companion Deck on Right) */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start pt-2">
         {/* Left Column: Files Table / Grid */}
@@ -407,6 +516,7 @@ export const FileTransfer: React.FC<FileTransferProps> = ({
                 const isDirectory = !!file.isDirectory;
                 const badge = getFileBadge(file.name, isDirectory);
                 const isThisDownloading = downloadingName === file.name;
+                const isSelected = selectedFiles.has(file.name);
 
                 return (
                   <motion.div
@@ -414,10 +524,27 @@ export const FileTransfer: React.FC<FileTransferProps> = ({
                     initial={{ opacity: 0, y: 2 }}
                     animate={{ opacity: 1, y: 0 }}
                     transition={{ duration: 0.15, delay: Math.min(idx * 0.02, 0.1) }}
-                    className="p-3 sm:p-3.5 rounded-2xl bg-[#F8FAFC] hover:bg-[#F1F5F9] dark:bg-[#141926] dark:hover:bg-[#1A2030] border border-black/[0.04] dark:border-white/[0.04] flex items-center justify-between gap-3 transition-colors group"
+                    className={`p-3 sm:p-3.5 rounded-2xl border flex items-center justify-between gap-3 transition-colors group ${
+                      isSelected
+                        ? 'bg-[#0071E3]/5 dark:bg-[#C6F432]/10 border-[#0071E3]/30 dark:border-[#C6F432]/30 ring-1 ring-[#0071E3]/20 dark:ring-[#C6F432]/20'
+                        : 'bg-[#F8FAFC] hover:bg-[#F1F5F9] dark:bg-[#141926] dark:hover:bg-[#1A2030] border-black/[0.04] dark:border-white/[0.04]'
+                    }`}
                   >
                     {/* Icon + Name + Metadata */}
-                    <div className="flex items-center gap-3 min-w-0 flex-1">
+                    <div className="flex items-center gap-2.5 sm:gap-3 min-w-0 flex-1">
+                      {/* Selection Checkbox */}
+                      <button
+                        onClick={() => toggleSelectFile(file.name)}
+                        className="p-1 -ml-1 rounded-lg text-[#64748B] hover:text-[#0F1115] dark:text-[#94A3B8] dark:hover:text-white transition-colors shrink-0"
+                        title={isSelected ? 'Deselect item' : 'Select item'}
+                      >
+                        {isSelected ? (
+                          <CheckSquare className="w-4 h-4 text-[#0071E3] dark:text-[#C6F432]" />
+                        ) : (
+                          <Square className="w-4 h-4 opacity-40 group-hover:opacity-100 transition-opacity" />
+                        )}
+                      </button>
+
                       <div className="w-10 h-10 rounded-xl bg-white dark:bg-white/[0.06] border border-black/[0.06] dark:border-white/[0.08] shadow-xs flex items-center justify-center shrink-0">
                         {isDirectory ? (
                           <M3FolderIcon className="w-5 h-5 text-[#F59E0B]" />
@@ -497,6 +624,7 @@ export const FileTransfer: React.FC<FileTransferProps> = ({
                 const isImg = isImageFile(file.name, isDirectory);
                 const badge = getFileBadge(file.name, isDirectory);
                 const isThisDownloading = downloadingName === file.name;
+                const isSelected = selectedFiles.has(file.name);
 
                 return (
                   <motion.div
@@ -504,7 +632,11 @@ export const FileTransfer: React.FC<FileTransferProps> = ({
                     initial={{ opacity: 0, y: 2 }}
                     animate={{ opacity: 1, y: 0 }}
                     transition={{ duration: 0.15, delay: Math.min(idx * 0.02, 0.1) }}
-                    className="rounded-2xl p-3.5 bg-[#F8FAFC] hover:bg-[#F1F5F9] dark:bg-[#141926] dark:hover:bg-[#1A2030] border border-black/[0.04] dark:border-white/[0.04] flex flex-col justify-between transition-colors group"
+                    className={`rounded-2xl p-3.5 border flex flex-col justify-between transition-colors group ${
+                      isSelected
+                        ? 'bg-[#0071E3]/5 dark:bg-[#C6F432]/10 border-[#0071E3]/30 dark:border-[#C6F432]/30 ring-1 ring-[#0071E3]/20 dark:ring-[#C6F432]/20'
+                        : 'bg-[#F8FAFC] hover:bg-[#F1F5F9] dark:bg-[#141926] dark:hover:bg-[#1A2030] border-black/[0.04] dark:border-white/[0.04]'
+                    }`}
                   >
                     {isImg && (
                       <div
@@ -523,6 +655,19 @@ export const FileTransfer: React.FC<FileTransferProps> = ({
                     )}
 
                     <div className="flex items-start gap-2.5 min-w-0">
+                      {/* Selection Checkbox */}
+                      <button
+                        onClick={() => toggleSelectFile(file.name)}
+                        className="p-1 -ml-1 mt-0.5 rounded-lg text-[#64748B] hover:text-[#0F1115] dark:text-[#94A3B8] dark:hover:text-white transition-colors shrink-0"
+                        title={isSelected ? 'Deselect item' : 'Select item'}
+                      >
+                        {isSelected ? (
+                          <CheckSquare className="w-4 h-4 text-[#0071E3] dark:text-[#C6F432]" />
+                        ) : (
+                          <Square className="w-4 h-4 opacity-40 group-hover:opacity-100 transition-opacity" />
+                        )}
+                      </button>
+
                       <div className="shrink-0 p-2 rounded-xl bg-white dark:bg-white/[0.06] border border-black/[0.04] dark:border-transparent">
                         {isDirectory ? (
                           <M3FolderIcon className="w-5 h-5 text-[#F59E0B]" />
@@ -637,6 +782,18 @@ export const FileTransfer: React.FC<FileTransferProps> = ({
           }
         }}
         onClose={() => setDeleteTarget(null)}
+      />
+
+      {/* Bulk Delete Custom Confirmation Modal */}
+      <ConfirmModal
+        isOpen={showBulkConfirm}
+        title={`Delete ${selectedFiles.size} Item${selectedFiles.size === 1 ? '' : 's'}?`}
+        message={`Are you sure you want to permanently delete ${selectedFiles.size} selected item(s) from AirBridge storage? This cannot be undone.`}
+        itemName={`${selectedFiles.size} selected items`}
+        itemType="file"
+        confirmLabel={isBulkDeleting ? 'Deleting...' : `Delete ${selectedFiles.size} Items`}
+        onConfirm={executeBulkDelete}
+        onClose={() => setShowBulkConfirm(false)}
       />
     </div>
   );
