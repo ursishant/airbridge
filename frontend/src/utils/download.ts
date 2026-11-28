@@ -1,4 +1,4 @@
-import { getDeviceId } from './device';
+import { getDeviceId, getAuthHeaders } from './device';
 
 function getStoredOfficePin(): string {
   try {
@@ -78,11 +78,7 @@ async function downloadFileParallel(
   fileSize: number,
   onProgress?: (info: DownloadProgressInfo) => void
 ): Promise<boolean> {
-  const pin = getStoredOfficePin();
-  const devId = getDeviceId();
-  const authHeaders: Record<string, string> = { Accept: '*/*' };
-  if (pin) authHeaders['x-airbridge-pin'] = pin;
-  if (devId) authHeaders['x-airbridge-device-id'] = devId;
+  const authHeaders: Record<string, string> = getAuthHeaders({ Accept: '*/*' });
 
   const rangedUrl = url.replace('/api/files/', '/api/files-ranged/');
   const chunkSize = getOptimalDownloadChunkSize(fileSize);
@@ -173,9 +169,7 @@ export async function downloadFileSafely(
     authedUrl += (authedUrl.includes('?') ? '&' : '?') + `deviceId=${encodeURIComponent(devId)}`;
   }
 
-  const authHeaders: Record<string, string> = { 'Accept': '*/*' };
-  if (pin) authHeaders['x-airbridge-pin'] = pin;
-  if (devId) authHeaders['x-airbridge-device-id'] = devId;
+  const authHeaders: Record<string, string> = getAuthHeaders({ Accept: '*/*' });
 
   // On Mobile (Android / iOS): ALWAYS stream directly via native OS download manager!
   // Android DownloadManager / iOS Safari streams directly to device storage at full gigabit Wi-Fi line rate

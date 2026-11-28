@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { RefreshCw, X, Sparkles } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { M3CameraIcon, M3SendIcon } from './M3Icons';
+import { getAuthHeaders } from '../utils/device';
 
 interface CameraRapidSnapProps {
   isOpen: boolean;
@@ -47,6 +48,7 @@ export const CameraRapidSnap: React.FC<CameraRapidSnapProps> = ({
 
       const res = await fetch('/api/upload-snap', {
         method: 'POST',
+        headers: getAuthHeaders(),
         body: formData,
       });
 
@@ -55,9 +57,9 @@ export const CameraRapidSnap: React.FC<CameraRapidSnapProps> = ({
           particleCount: 40,
           spread: 60,
           origin: { y: 0.7 },
-          colors: ['#10B981', '#0071E3', '#38BDF8'],
+          colors: ['#10B981', '#3B82F6', '#60A5FA'],
         });
-        showToast('Photo beamed straight to your Mac');
+        showToast('Photo beamed straight to your Host Vault');
         setPhotoData(null);
         setNote('');
         onClose();
@@ -80,7 +82,7 @@ export const CameraRapidSnap: React.FC<CameraRapidSnapProps> = ({
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
           transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
-          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xl"
+          className="bento-modal-backdrop z-50 flex items-center justify-center p-4"
           onClick={onClose}
         >
           <motion.div 
@@ -89,7 +91,7 @@ export const CameraRapidSnap: React.FC<CameraRapidSnapProps> = ({
             animate={{ opacity: 1, scale: 1, filter: 'blur(0px)', y: 0 }}
             exit={{ opacity: 0, scale: 0.97, filter: 'blur(3px)', y: 4 }}
             transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
-            className="relative w-full max-w-md bg-white dark:bg-[#13151B] border border-black/[0.08] dark:border-white/[0.08] rounded-3xl p-6 sm:p-7 text-[#0F1115] dark:text-[#F3F4F6] shadow-2xl transition-colors"
+            className="bento-modal max-w-md p-6 sm:p-7 transition-colors"
             onClick={(e) => e.stopPropagation()}
           >
             {/* Close Button */}
@@ -102,14 +104,14 @@ export const CameraRapidSnap: React.FC<CameraRapidSnapProps> = ({
             </button>
 
             <div className="text-center mb-5">
-              <div className="inline-flex p-3.5 rounded-2xl bg-[#10B981]/15 text-[#10B981] mb-2.5 shadow-sm">
+              <div className="inline-flex p-3.5 rounded-2xl bg-[#10B981]/15 text-[#10B981] border border-[#10B981]/25 mb-2.5 shadow-sm">
                 <M3CameraIcon className="w-7 h-7" />
               </div>
               <h3 className="font-display text-xl font-extrabold tracking-tight text-[#0F1115] dark:text-[#F3F4F6]">
                 Continuity Snap
               </h3>
               <p className="text-xs text-[#64748B] dark:text-[#94A3B8] mt-1">
-                Snap documents or whiteboard notes on Android and beam them straight to your Mac.
+                Snap documents, whiteboards, or receipts and beam them straight to your desktop Vault.
               </p>
             </div>
 
@@ -144,13 +146,13 @@ export const CameraRapidSnap: React.FC<CameraRapidSnapProps> = ({
                   value={note}
                   onChange={(e) => setNote(e.target.value)}
                   placeholder="Optional label (e.g. Receipt, Passport, Note)..."
-                  className="w-full bg-[#F8FAFC] dark:bg-[#181A22] text-xs text-[#0F1115] dark:text-[#F3F4F6] placeholder-[#64748B] rounded-2xl px-4 py-2.5 border border-black/[0.08] dark:border-white/[0.08] focus:outline-none focus:border-[#10B981] font-sans"
+                  className="bento-input text-xs px-4 py-2.5 font-sans"
                 />
 
                 <div className="flex items-center gap-3">
                   <button
                     onClick={() => fileInputRef.current?.click()}
-                    className="apple-press flex-1 py-2.5 rounded-2xl text-xs font-semibold bg-black/[0.04] dark:bg-white/[0.08] hover:bg-black/[0.08] dark:hover:bg-white/[0.12] text-[#0F1115] dark:text-[#F3F4F6] transition-colors"
+                    className="bento-btn-secondary flex-1 py-2.5 text-xs"
                   >
                     Retake
                   </button>
@@ -158,14 +160,14 @@ export const CameraRapidSnap: React.FC<CameraRapidSnapProps> = ({
                   <button
                     onClick={handleSendToMac}
                     disabled={isSending}
-                    className="apple-press flex-2 flex items-center justify-center gap-2 py-2.5 px-5 rounded-2xl text-xs sm:text-sm font-bold bg-[#0F1115] hover:bg-black text-white dark:bg-white dark:hover:bg-slate-100 dark:text-[#0B0D13] shadow-sm transition-colors disabled:opacity-50"
+                    className="bento-btn-primary flex-[2] py-2.5 px-5 text-xs sm:text-sm"
                   >
                     {isSending ? (
                       <Sparkles className="w-4 h-4 animate-spin" />
                     ) : (
                       <M3SendIcon className="w-4 h-4" />
                     )}
-                    <span>Beam to Mac</span>
+                    <span>Beam to Vault</span>
                   </button>
                 </div>
               </div>
@@ -173,10 +175,10 @@ export const CameraRapidSnap: React.FC<CameraRapidSnapProps> = ({
               <div className="py-8 flex flex-col items-center justify-center">
                 <button
                   onClick={() => fileInputRef.current?.click()}
-                  className="apple-press hover-lift w-24 h-24 rounded-full bg-[#10B981]/10 dark:bg-[#10B981]/15 hover:bg-[#10B981]/25 border-2 border-[#10B981]/30 flex flex-col items-center justify-center gap-2 text-[#10B981] transition-colors shadow-sm"
+                  className="apple-press w-24 h-24 rounded-2xl bg-[#F1F5F9] dark:bg-[#181C26] hover:bg-[#E2E8F0] dark:hover:bg-[#1F2430] border border-[#E2E8F0] dark:border-white/[0.1] flex flex-col items-center justify-center gap-2 text-[#10B981] transition-colors"
                 >
                   <M3CameraIcon className="w-8 h-8" />
-                  <span className="text-[11px] font-bold">Snap Now</span>
+                  <span className="text-[11px] font-semibold">Snap Now</span>
                 </button>
                 <p className="text-xs text-[#64748B] dark:text-[#94A3B8] mt-4 font-medium">
                   Tap to open camera and take picture

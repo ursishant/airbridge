@@ -53,7 +53,7 @@ export const ConfirmModal: React.FC<ConfirmModalProps> = ({
             exit={{ opacity: 0 }}
             transition={{ duration: 0.2 }}
             onClick={onClose}
-            className="fixed inset-0 bg-black/60 backdrop-blur-xl"
+            className="bento-modal-backdrop"
           />
 
           {/* Dialog Container */}
@@ -62,7 +62,7 @@ export const ConfirmModal: React.FC<ConfirmModalProps> = ({
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.94, y: 12 }}
             transition={{ type: 'spring', stiffness: 420, damping: 30 }}
-            className="relative z-10 w-full max-w-sm sm:max-w-md bg-white dark:bg-[#141926] border border-black/[0.08] dark:border-white/[0.1] rounded-[32px] p-6 sm:p-7 shadow-2xl overflow-hidden"
+            className="bento-modal max-w-sm sm:max-w-md p-6 sm:p-7 overflow-hidden"
           >
             {/* Top Close Button */}
             <button
@@ -130,7 +130,7 @@ export const ConfirmModal: React.FC<ConfirmModalProps> = ({
               <button
                 type="button"
                 onClick={onClose}
-                className="apple-press px-4 py-2.5 rounded-2xl text-xs font-bold text-[#64748B] hover:text-[#0F1115] dark:text-[#94A3B8] dark:hover:text-white bg-black/[0.04] hover:bg-black/[0.08] dark:bg-white/[0.06] dark:hover:bg-white/[0.1] transition-colors"
+                className="bento-btn-secondary px-4 py-2.5 text-xs"
               >
                 {cancelLabel}
               </button>
@@ -141,10 +141,10 @@ export const ConfirmModal: React.FC<ConfirmModalProps> = ({
                   onConfirm();
                   onClose();
                 }}
-                className={`apple-press px-5 py-2.5 rounded-2xl text-xs font-bold transition-all shadow-sm ${
+                className={`px-5 py-2.5 rounded-2xl text-xs font-bold transition-all shadow-sm ${
                   isDestructive
-                    ? 'bg-rose-500 hover:bg-rose-600 active:bg-rose-700 text-white shadow-rose-500/20'
-                    : 'bg-[#0F1115] hover:bg-black text-white dark:bg-[#C6F432] dark:hover:bg-[#B5E22B] dark:text-[#0A0D14]'
+                    ? 'apple-press bg-rose-500 hover:bg-rose-600 active:bg-rose-700 text-white shadow-rose-500/20'
+                    : 'bento-btn-primary'
                 }`}
               >
                 {confirmLabel}

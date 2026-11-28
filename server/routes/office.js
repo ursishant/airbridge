@@ -4,6 +4,7 @@ const {
   recordFailedPinAttempt,
   resetPinAttempts,
   getPinLockoutInfo,
+  verifyPinTimingSafe,
   issueSession,
   getNormalizedRemoteAddress,
   getClientDeviceId,
@@ -11,7 +12,7 @@ const {
 
 function createOfficeRouter(options) {
   const router = express.Router();
-  const { stateStore, broadcast } = options;
+  const { stateStore, broadcast, isRoomFullForDevice, kickDeviceById } = options;
 
   // Check approval status (polled by waiting peer devices)
   router.get('/approval-status', (req, res) => {
@@ -55,6 +56,18 @@ function createOfficeRouter(options) {
     const isSimulatedPeer = Boolean(req.headers['x-airbridge-simulated-peer'] || (req.query && req.query.simulatePeer === '1'));
     const isHost = isHostRequest(req) && !isSimulatedPeer;
 
+    if (typeof isRoomFullForDevice === 'function') {
+      const capacity = isRoomFullForDevice(deviceId, isHost);
+      if (capacity && capacity.full) {
+        return res.status(403).json({
+          error: `Room is full (${capacity.currentCount}/${capacity.maxParticipants} people joined)`,
+          roomFull: true,
+          maxParticipants: capacity.maxParticipants,
+          currentCount: capacity.currentCount,
+        });
+      }
+    }
+
     if (!state.officeSecurity?.enabled) {
       const token = issueSession(ip, deviceId);
       res.cookie('airbridge_session', token, {
@@ -65,7 +78,7 @@ function createOfficeRouter(options) {
       return res.json({ success: true, enabled: false, token, deviceId });
     }
 
-    if (state.officeSecurity.pin && rawPin === state.officeSecurity.pin) {
+    if (verifyPinTimingSafe(rawPin, state.officeSecurity.pin)) {
       resetPinAttempts(ip);
 
       // If host has enabled "Require Approval" for non-host peers:
@@ -204,8 +217,12 @@ function createOfficeRouter(options) {
     res.json({ success: true, revoked: deviceId });
   });
 
-  // Configure Office Security
+  // Configure Office Security (Strictly host-only)
   router.post('/configure', async (req, res) => {
+    if (!isHostRequest(req)) {
+      return res.status(403).json({ error: 'Only the host machine can configure office security' });
+    }
+
     const state = stateStore.getState();
     const { enabled, regenerate, pin, requireApproval } = req.body || {};
 
@@ -248,6 +265,83 @@ function createOfficeRouter(options) {
       officeSecurity: state.officeSecurity,
       approvedDevices: state.approvedDevices,
     });
+  });
+
+  // Update customizable Room Settings (Room Name, Member Limit, Permissions) — strictly host-only
+  router.post('/room-settings', async (req, res) => {
+    if (!isHostRequest(req)) {
+      return res.status(403).json({ error: 'Only the host machine can customize room settings' });
+    }
+
+    const state = stateStore.getState();
+    if (!state.roomSettings || typeof state.roomSettings !== 'object') {
+      state.roomSettings = {
+        roomName: 'AirBridge Room',
+        maxParticipants: 0,
+        allowUploads: true,
+        allowChat: true,
+        allowClipboard: true,
+      };
+    }
+
+    const { roomName, maxParticipants, allowUploads, allowChat, allowClipboard } = req.body || {};
+
+    if (typeof roomName === 'string') {
+      const cleanName = roomName.trim().slice(0, 40);
+      if (cleanName) state.roomSettings.roomName = cleanName;
+    }
+
+    if (maxParticipants !== undefined && maxParticipants !== null) {
+      const parsed = parseInt(maxParticipants, 10);
+      if (isNaN(parsed) || parsed < 0 || parsed > 100) {
+        return res.status(400).json({ error: 'maxParticipants must be between 0 (unlimited) and 100' });
+      }
+      state.roomSettings.maxParticipants = parsed;
+    }
+
+    if (typeof allowUploads === 'boolean') state.roomSettings.allowUploads = allowUploads;
+    if (typeof allowChat === 'boolean') state.roomSettings.allowChat = allowChat;
+    if (typeof allowClipboard === 'boolean') state.roomSettings.allowClipboard = allowClipboard;
+
+    await stateStore.save();
+
+    broadcast({
+      type: 'room_settings_updated',
+      roomSettings: state.roomSettings,
+    });
+
+    res.json({
+      success: true,
+      roomSettings: state.roomSettings,
+    });
+  });
+
+  // Kick/Disconnect a connected peer from the room (Host-only)
+  router.post('/kick-device', async (req, res) => {
+    if (!isHostRequest(req)) {
+      return res.status(403).json({ error: 'Only the host machine can remove participants' });
+    }
+
+    const { deviceId } = req.body || {};
+    if (!deviceId || typeof deviceId !== 'string') {
+      return res.status(400).json({ error: 'Missing deviceId' });
+    }
+
+    const state = stateStore.getState();
+    state.approvedDevices = (state.approvedDevices || []).filter(id => id !== deviceId);
+    state.pendingApprovalRequests = (state.pendingApprovalRequests || []).filter(r => r.id !== deviceId);
+    await stateStore.save();
+
+    if (typeof kickDeviceById === 'function') {
+      kickDeviceById(deviceId);
+    }
+
+    broadcast({
+      type: 'device_revoked',
+      deviceId,
+    });
+
+    res.json({ success: true, kicked: deviceId });
   });
 
   return router;

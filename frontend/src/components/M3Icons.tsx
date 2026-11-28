@@ -12,15 +12,17 @@ import React from 'react';
 interface IconProps {
   className?: string;
   filled?: boolean;
+  style?: React.CSSProperties;
 }
 
 /** M3 AirDrop / Beam Icon: Concentric rounded broadcast arcs with focal pill emitter */
-export const M3AirDropIcon: React.FC<IconProps> = ({ className = "w-6 h-6", filled = false }) => (
+export const M3AirDropIcon: React.FC<IconProps> = ({ className = "w-6 h-6", filled = false, style }) => (
   <svg 
     viewBox="0 0 24 24" 
     fill="none" 
     xmlns="http://www.w3.org/2000/svg" 
     className={className}
+    style={style}
     strokeWidth="2"
     strokeLinecap="round"
     strokeLinejoin="round"
@@ -51,12 +53,13 @@ export const M3AirDropIcon: React.FC<IconProps> = ({ className = "w-6 h-6", fill
 );
 
 /** M3 Universal Clipboard Icon: Rounded 24dp pad with clip tab and content geometry */
-export const M3ClipboardIcon: React.FC<IconProps> = ({ className = "w-6 h-6", filled = false }) => (
+export const M3ClipboardIcon: React.FC<IconProps> = ({ className = "w-6 h-6", filled = false, style }) => (
   <svg 
     viewBox="0 0 24 24" 
     fill="none" 
     xmlns="http://www.w3.org/2000/svg" 
     className={className}
+    style={style}
     strokeWidth="2"
     strokeLinecap="round"
     strokeLinejoin="round"
@@ -285,12 +288,13 @@ export const M3FolderIcon: React.FC<{ className?: string }> = ({ className = "w-
 );
 
 /** M3 Photos / Media Rosette */
-export const M3PhotosIcon: React.FC<{ className?: string }> = ({ className = "w-5 h-5" }) => (
+export const M3PhotosIcon: React.FC<IconProps> = ({ className = "w-5 h-5", style }) => (
   <svg 
     viewBox="0 0 24 24" 
     fill="none" 
     xmlns="http://www.w3.org/2000/svg" 
     className={className}
+    style={style}
     strokeWidth="2"
     strokeLinecap="round"
     strokeLinejoin="round"
@@ -303,12 +307,13 @@ export const M3PhotosIcon: React.FC<{ className?: string }> = ({ className = "w-
 );
 
 /** M3 Camera Icon */
-export const M3CameraIcon: React.FC<{ className?: string }> = ({ className = "w-5 h-5" }) => (
+export const M3CameraIcon: React.FC<IconProps> = ({ className = "w-5 h-5", style }) => (
   <svg 
     viewBox="0 0 24 24" 
     fill="none" 
     xmlns="http://www.w3.org/2000/svg" 
     className={className}
+    style={style}
     strokeWidth="2"
     strokeLinecap="round"
     strokeLinejoin="round"
@@ -324,12 +329,13 @@ export const M3CameraIcon: React.FC<{ className?: string }> = ({ className = "w-
 );
 
 /** M3 Document / File Icon */
-export const M3DocumentIcon: React.FC<{ className?: string }> = ({ className = "w-5 h-5" }) => (
+export const M3DocumentIcon: React.FC<IconProps> = ({ className = "w-5 h-5", style }) => (
   <svg 
     viewBox="0 0 24 24" 
     fill="none" 
     xmlns="http://www.w3.org/2000/svg" 
     className={className}
+    style={style}
     strokeWidth="2"
     strokeLinecap="round"
     strokeLinejoin="round"
@@ -390,12 +396,13 @@ export const M3SendIcon: React.FC<{ className?: string }> = ({ className = "w-4 
 );
 
 /** M3 Checkmark Icon */
-export const M3CheckIcon: React.FC<{ className?: string }> = ({ className = "w-4 h-4" }) => (
+export const M3CheckIcon: React.FC<IconProps> = ({ className = "w-4 h-4", style }) => (
   <svg 
     viewBox="0 0 24 24" 
     fill="none" 
     xmlns="http://www.w3.org/2000/svg" 
     className={className}
+    style={style}
     strokeWidth="2.5"
     strokeLinecap="round"
     strokeLinejoin="round"
@@ -438,12 +445,13 @@ export const M3TrashIcon: React.FC<{ className?: string }> = ({ className = "w-4
 );
 
 /** M3 QR Code Icon */
-export const M3QrCodeIcon: React.FC<{ className?: string }> = ({ className = "w-4 h-4" }) => (
+export const M3QrCodeIcon: React.FC<IconProps> = ({ className = "w-4 h-4", style }) => (
   <svg 
     viewBox="0 0 24 24" 
     fill="none" 
     xmlns="http://www.w3.org/2000/svg" 
     className={className}
+    style={style}
     strokeWidth="2"
     strokeLinecap="round"
     strokeLinejoin="round"
@@ -459,12 +467,13 @@ export const M3QrCodeIcon: React.FC<{ className?: string }> = ({ className = "w-
 );
 
 /** M3 Volume / Sound Icon */
-export const M3VolumeIcon: React.FC<{ className?: string }> = ({ className = "w-4 h-4" }) => (
+export const M3VolumeIcon: React.FC<IconProps> = ({ className = "w-4 h-4", style }) => (
   <svg 
     viewBox="0 0 24 24" 
     fill="none" 
     xmlns="http://www.w3.org/2000/svg" 
     className={className}
+    style={style}
     strokeWidth="2"
     strokeLinecap="round"
     strokeLinejoin="round"
@@ -493,12 +502,13 @@ export const M3VolumeMuteIcon: React.FC<{ className?: string }> = ({ className =
 );
 
 /** M3 Phone Vibrate / Ring Icon */
-export const M3VibrateIcon: React.FC<{ className?: string }> = ({ className = "w-4 h-4" }) => (
+export const M3VibrateIcon: React.FC<IconProps> = ({ className = "w-4 h-4", style }) => (
   <svg 
     viewBox="0 0 24 24" 
     fill="none" 
     xmlns="http://www.w3.org/2000/svg" 
     className={className}
+    style={style}
     strokeWidth="2"
     strokeLinecap="round"
     strokeLinejoin="round"
@@ -609,15 +619,17 @@ export const M3LinuxIcon: React.FC<{ className?: string }> = ({ className = "w-5
 );
 
 /** M3 Shield Lock Icon for Office Room Security */
-export const M3ShieldLockIcon: React.FC<{ className?: string; filled?: boolean }> = ({ 
+export const M3ShieldLockIcon: React.FC<IconProps> = ({ 
   className = "w-5 h-5",
-  filled = false 
+  filled = false,
+  style 
 }) => (
   <svg 
     viewBox="0 0 24 24" 
     fill="none" 
     xmlns="http://www.w3.org/2000/svg" 
     className={className}
+    style={style}
     strokeWidth="2"
     strokeLinecap="round"
     strokeLinejoin="round"

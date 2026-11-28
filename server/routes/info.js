@@ -60,6 +60,13 @@ function createInfoRouter(options) {
       hostToken: isHost ? BOOT_HOST_SECRET : undefined,
       downloadsDir: getSanitizedDownloadsDir(),
       connectedCount: getUniqueDevices().length,
+      roomSettings: state.roomSettings || {
+        roomName: 'AirBridge Room',
+        maxParticipants: 0,
+        allowUploads: true,
+        allowChat: true,
+        allowClipboard: true,
+      },
       officeSecurity: {
         enabled: isSecEnabled,
         requiresAuth: isSecEnabled && !isAuthed,

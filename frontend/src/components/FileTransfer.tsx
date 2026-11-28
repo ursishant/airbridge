@@ -13,14 +13,15 @@ import {
   Search,
   LayoutGrid,
   List,
-  CheckCircle2,
   CheckSquare,
   Square,
-  MinusSquare,
+  Eye,
+  FolderOpen,
 } from 'lucide-react';
 import type { UploadedFileItem, ServerInfo } from '../hooks/useWebSocket';
 import { M3FolderIcon, M3DocumentIcon } from './M3Icons';
 import { ConfirmModal } from './ConfirmModal';
+import { FilePreviewModal, isPreviewableFile } from './FilePreviewModal';
 import { getAuthHeaders } from '../utils/device';
 import { downloadFileSafely } from '../utils/download';
 
@@ -47,7 +48,6 @@ export const FileTransfer: React.FC<FileTransferProps> = ({
   serverInfo,
   recentFiles,
   showToast,
-  companionDeck,
 }) => {
   const [allFiles, setAllFiles] = useState<FileItemWithFolder[]>(() => {
     try {
@@ -56,13 +56,14 @@ export const FileTransfer: React.FC<FileTransferProps> = ({
     } catch (e) {}
     return [];
   });
-  const [previewImage, setPreviewImage] = useState<string | null>(null);
+  const [previewFile, setPreviewFile] = useState<FileItemWithFolder | null>(null);
   const [downloadingName, setDownloadingName] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<'table' | 'grid'>('table');
   const [activeCategory, setActiveCategory] = useState<FilterCategory>('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [deleteTarget, setDeleteTarget] = useState<{ name: string; isDirectory?: boolean } | null>(null);
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set());
+  const [brokenImages, setBrokenImages] = useState<Set<string>>(new Set());
   const [isBulkDeleting, setIsBulkDeleting] = useState(false);
   const [showBulkConfirm, setShowBulkConfirm] = useState(false);
 
@@ -90,7 +91,6 @@ export const FileTransfer: React.FC<FileTransferProps> = ({
     return () => clearTimeout(timer);
   }, [recentFiles]);
 
-  // Synchronize deletions from WebSocket broadcasts across all connected tabs/devices
   useEffect(() => {
     const handleFileDeleted = (e: Event) => {
       const customEvent = e as CustomEvent<{ filename: string }>;
@@ -107,15 +107,12 @@ export const FileTransfer: React.FC<FileTransferProps> = ({
   const executeDelete = async (filename: string) => {
     try {
       const headers = getAuthHeaders({ 'Content-Type': 'application/json' });
-
-      // 1. Try POST /api/files/delete with JSON body (handles spaces and special characters reliably)
       let res = await fetch('/api/files/delete', {
         method: 'POST',
         headers,
         body: JSON.stringify({ filename }),
       });
 
-      // 2. Fall back to DELETE /api/files/:filename if needed
       if (!res.ok) {
         res = await fetch(`/api/files/${encodeURIComponent(filename)}`, {
           method: 'DELETE',
@@ -125,7 +122,6 @@ export const FileTransfer: React.FC<FileTransferProps> = ({
 
       if (res.ok) {
         showToast(`Removed ${filename}`);
-        // Instantly remove from view for responsive feedback
         setAllFiles((prev) => {
           const updated = prev.filter((f) => f.name !== filename);
           try {
@@ -146,11 +142,8 @@ export const FileTransfer: React.FC<FileTransferProps> = ({
   const toggleSelectFile = (filename: string) => {
     setSelectedFiles((prev) => {
       const next = new Set(prev);
-      if (next.has(filename)) {
-        next.delete(filename);
-      } else {
-        next.add(filename);
-      }
+      if (next.has(filename)) next.delete(filename);
+      else next.add(filename);
       return next;
     });
   };
@@ -169,7 +162,6 @@ export const FileTransfer: React.FC<FileTransferProps> = ({
     const toDelete = Array.from(selectedFiles);
     try {
       const headers = getAuthHeaders({ 'Content-Type': 'application/json' });
-
       const res = await fetch('/api/files/bulk-delete', {
         method: 'POST',
         headers,
@@ -178,7 +170,7 @@ export const FileTransfer: React.FC<FileTransferProps> = ({
 
       if (res.ok) {
         const data = await res.json();
-        showToast(`Successfully deleted ${data.deletedCount || toDelete.length} item(s)`);
+        showToast(`Deleted ${data.deletedCount || toDelete.length} item(s)`);
         setAllFiles((prev) => prev.filter((f) => !selectedFiles.has(f.name)));
         setSelectedFiles(new Set());
         fetchFiles();
@@ -196,7 +188,6 @@ export const FileTransfer: React.FC<FileTransferProps> = ({
   const handleOpenInFinder = async (filename?: string) => {
     try {
       const headers = getAuthHeaders({ 'Content-Type': 'application/json' });
-
       const res = await fetch('/api/open-in-finder', {
         method: 'POST',
         headers,
@@ -204,7 +195,7 @@ export const FileTransfer: React.FC<FileTransferProps> = ({
       });
       if (res.ok) {
         const isWin = isWindows || serverInfo?.isWindows || serverInfo?.platform === 'win32';
-        showToast(isWin ? 'Revealed in Windows File Explorer' : 'Revealed in Finder');
+        showToast(isWin ? 'Revealed in Explorer' : 'Revealed in Finder');
       }
     } catch (e) {
       showToast('Failed to open file manager');
@@ -216,11 +207,7 @@ export const FileTransfer: React.FC<FileTransferProps> = ({
     showToast(`Downloading ${filename}...`);
     try {
       const success = await downloadFileSafely(url, filename, fileSize);
-      if (success) {
-        showToast(`Saved ${filename}`);
-      } else {
-        showToast('Download started');
-      }
+      showToast(success ? `Saved ${filename}` : 'Download started');
     } catch (e) {
       showToast('Download error');
     } finally {
@@ -237,23 +224,21 @@ export const FileTransfer: React.FC<FileTransferProps> = ({
   };
 
   const getFileBadge = (name: string, isDirectory?: boolean) => {
-    if (isDirectory) {
-      return { icon: <FolderArchive className="w-4 h-4 text-[#F59E0B]" />, label: 'FOLDER', type: 'folder' };
-    }
+    if (isDirectory) return { icon: <FolderArchive className="w-4 h-4 text-amber-500" />, label: 'FOLDER', type: 'folder' };
     const ext = name.split('.').pop()?.toLowerCase();
     if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'heic', 'svg'].includes(ext || '')) {
-      return { icon: <ImageIcon className="w-4 h-4 text-[#A855F7]" />, label: ext?.toUpperCase() || 'IMG', type: 'media' };
+      return { icon: <ImageIcon className="w-4 h-4 text-purple-500" />, label: ext?.toUpperCase() || 'IMG', type: 'media' };
     }
     if (['mp4', 'mov', 'mkv', 'webm', 'avi'].includes(ext || '')) {
-      return { icon: <Film className="w-4 h-4 text-[#3B82F6]" />, label: ext?.toUpperCase() || 'VID', type: 'media' };
+      return { icon: <Film className="w-4 h-4 text-blue-500" />, label: ext?.toUpperCase() || 'VID', type: 'media' };
     }
     if (['mp3', 'm4a', 'wav', 'flac', 'aac'].includes(ext || '')) {
-      return { icon: <Music className="w-4 h-4 text-[#F59E0B]" />, label: ext?.toUpperCase() || 'AUDIO', type: 'media' };
+      return { icon: <Music className="w-4 h-4 text-amber-500" />, label: ext?.toUpperCase() || 'AUDIO', type: 'media' };
     }
     if (['apk'].includes(ext || '')) {
-      return { icon: <Package className="w-4 h-4 text-[#10B981]" />, label: 'APK', type: 'docs' };
+      return { icon: <Package className="w-4 h-4 text-emerald-500" />, label: 'APK', type: 'docs' };
     }
-    return { icon: <FileText className="w-4 h-4 text-[#3B82F6]" />, label: ext?.toUpperCase() || 'DOC', type: 'docs' };
+    return { icon: <FileText className="w-4 h-4 text-blue-500" />, label: ext?.toUpperCase() || 'FILE', type: 'docs' };
   };
 
   const isImageFile = (name: string, isDirectory?: boolean) => {
@@ -262,66 +247,54 @@ export const FileTransfer: React.FC<FileTransferProps> = ({
     return ['jpg', 'jpeg', 'png', 'gif', 'webp', 'heic', 'svg'].includes(ext || '');
   };
 
-  // Filtered files based on category and search query
   const filteredFiles = useMemo(() => {
     return allFiles.filter((f) => {
-      // Category filter
       if (activeCategory === 'folders' && !f.isDirectory) return false;
-      if (activeCategory === 'media') {
-        const badge = getFileBadge(f.name, f.isDirectory);
-        if (badge.type !== 'media') return false;
-      }
-      if (activeCategory === 'docs') {
-        const badge = getFileBadge(f.name, f.isDirectory);
-        if (badge.type !== 'docs') return false;
-      }
-      // Search filter
-      if (searchQuery.trim()) {
-        const q = searchQuery.toLowerCase();
-        if (!f.name.toLowerCase().includes(q)) return false;
-      }
+      if (activeCategory === 'media' && getFileBadge(f.name, f.isDirectory).type !== 'media') return false;
+      if (activeCategory === 'docs' && getFileBadge(f.name, f.isDirectory).type !== 'docs') return false;
+      if (searchQuery.trim() && !f.name.toLowerCase().includes(searchQuery.toLowerCase())) return false;
       return true;
     });
   }, [allFiles, activeCategory, searchQuery]);
 
-  const folderCount = allFiles.filter(f => f.isDirectory).length;
-  const mediaCount = allFiles.filter(f => getFileBadge(f.name, f.isDirectory).type === 'media').length;
-  const docCount = allFiles.filter(f => getFileBadge(f.name, f.isDirectory).type === 'docs').length;
+  const totalVaultSize = useMemo(
+    () => allFiles.reduce((sum, f) => sum + (Number(f.size) || 0), 0),
+    [allFiles]
+  );
+
+  const folderCount = allFiles.filter((f) => f.isDirectory).length;
+  const mediaCount = allFiles.filter((f) => getFileBadge(f.name, f.isDirectory).type === 'media').length;
+  const docCount = allFiles.filter((f) => getFileBadge(f.name, f.isDirectory).type === 'docs').length;
+
+  const vaultPathLabel = (serverInfo?.downloadsDir || '~/Downloads/AirBridge')
+    .replace(/^\/Users\/[^/]+/, '~')
+    .replace(/^[a-zA-Z]:\\Users\\[^\\]+/i, '~');
 
   return (
-    <div className="bento-card rounded-[32px] p-5 sm:p-7 transition-colors duration-200 space-y-5">
-      {/* 1. Header: Brand Icon, Title, Path, and Actions (Finder, Download All, Layout Switcher) */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-black/[0.06] dark:border-white/[0.06]">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-2xl bg-[#0F1115] text-white dark:bg-[#C6F432] dark:text-[#0A0D14] flex items-center justify-center font-bold shadow-sm shrink-0 transition-colors">
-            <M3FolderIcon className="w-5 h-5 text-inherit" />
-          </div>
-          <div>
-            <div className="flex items-center gap-2">
-              <h3 className="font-display text-base font-bold text-[#0F1115] dark:text-white tracking-tight">
-                Office Shared Files Folder
-              </h3>
-              <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded-full bg-black/[0.05] dark:bg-white/[0.08] text-[#0071E3] dark:text-[#C6F432]">
-                {allFiles.length} {allFiles.length === 1 ? 'FILE' : 'FILES'}
-              </span>
-            </div>
-            <p className="text-xs text-[#64748B] dark:text-[#94A3B8] mt-0.5">
-              Direct Wi-Fi storage in <code className="font-mono text-[#0F1115] dark:text-white bg-black/[0.04] dark:bg-white/10 px-1.5 py-0.5 rounded text-[11px]">{(serverInfo?.downloadsDir || '~/Downloads/AirBridge').replace(/^\/Users\/[^/]+/, '~').replace(/^[a-zA-Z]:\\Users\\[^\\]+/i, '~')}</code>
-            </p>
-          </div>
+    <div className="w-full space-y-4">
+      {/* Header Row — shows item count + total size cleanly on mobile & desktop */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-1 min-w-0">
+          <h3 className="font-display text-sm font-bold tracking-tight" style={{ color: 'var(--text-primary)' }}>
+            Shared Vault
+          </h3>
+          <span className="text-xs font-mono tabular-nums" style={{ color: 'var(--text-tertiary)' }}>
+            {allFiles.length} {allFiles.length === 1 ? 'item' : 'items'}
+            {allFiles.length > 0 ? ` · ${formatBytes(totalVaultSize)}` : ''}
+          </span>
+          <span className="hidden md:inline text-xs font-mono truncate" style={{ color: 'var(--text-tertiary)' }}>
+            · {vaultPathLabel}
+          </span>
         </div>
 
-        {/* Action Tools: Finder Reveal, ZIP Download All, Layout Switcher */}
-        <div className="flex items-center gap-2 self-start sm:self-auto">
+        <div className="flex items-center gap-1.5 flex-wrap">
           {(isMac || isWindows || serverInfo?.isWindows) && (
             <button
-              onClick={() => {
-                handleOpenInFinder();
-              }}
-              className="apple-press flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-[#F8FAFC] dark:bg-[#181E2E] hover:bg-black/[0.04] dark:hover:bg-[#222A3E] text-[#0F1115] dark:text-white border border-black/[0.06] dark:border-white/[0.08] shadow-sm transition-colors"
-              title={isWindows || serverInfo?.isWindows ? "Reveal in File Explorer" : "Reveal in Finder"}
+              onClick={() => handleOpenInFinder()}
+              className="ab-btn ab-btn-ghost h-8 px-2.5 text-xs"
+              title={isWindows || serverInfo?.isWindows ? 'Reveal in Explorer' : 'Reveal in Finder'}
             >
-              <M3FolderIcon className="w-3.5 h-3.5 text-[#0071E3] dark:text-[#38BDF8]" />
+              <FolderOpen className="w-3.5 h-3.5 shrink-0" style={{ color: 'var(--accent)' }} />
               <span>{isWindows || serverInfo?.isWindows ? 'Explorer' : 'Finder'}</span>
             </button>
           )}
@@ -330,454 +303,432 @@ export const FileTransfer: React.FC<FileTransferProps> = ({
             <button
               onClick={() => handleSafeDownload('/api/download-zip', 'AirBridge_Files.zip')}
               disabled={downloadingName === 'AirBridge_Files.zip'}
-              className="apple-press flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-xs font-bold bg-[#0F1115] hover:bg-black text-white dark:bg-[#C6F432] dark:hover:bg-[#B5E22B] dark:text-[#0A0D14] transition-all shadow-sm disabled:opacity-50"
+              className="ab-btn ab-btn-ghost h-8 px-3 text-xs"
             >
               {downloadingName === 'AirBridge_Files.zip' ? (
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
               ) : (
-                <Download className="w-3.5 h-3.5" />
+                <Download className="w-3.5 h-3.5 shrink-0" />
               )}
-              <span>Download All</span>
+              <span>Download All ({formatBytes(totalVaultSize)})</span>
             </button>
           )}
 
-          {/* Layout Toggle (Table vs Grid) */}
-          <div className="flex items-center bg-black/[0.04] dark:bg-[#181E2E] p-0.5 rounded-xl border border-black/[0.04] dark:border-white/[0.08]">
-            <button
-              onClick={() => setViewMode('table')}
-              className={`p-1.5 rounded-lg text-xs transition-colors ${
-                viewMode === 'table' 
-                  ? 'bg-white dark:bg-[#2A344C] text-[#0F1115] dark:text-white shadow-sm' 
-                  : 'text-[#64748B] hover:text-[#0F1115] dark:text-[#94A3B8] dark:hover:text-white'
-              }`}
-              title="Table list view"
+          {allFiles.length > 0 && (
+            <div
+              className="flex items-center p-0.5 rounded-lg ml-auto sm:ml-0"
+              style={{ background: 'var(--surface-alt)', border: '1px solid var(--border)' }}
             >
-              <List className="w-3.5 h-3.5" />
-            </button>
-            <button
-              onClick={() => setViewMode('grid')}
-              className={`p-1.5 rounded-lg text-xs transition-colors ${
-                viewMode === 'grid' 
-                  ? 'bg-white dark:bg-[#2A344C] text-[#0F1115] dark:text-white shadow-sm' 
-                  : 'text-[#64748B] hover:text-[#0F1115] dark:text-[#94A3B8] dark:hover:text-white'
-              }`}
-              title="Grid card view"
-            >
-              <LayoutGrid className="w-3.5 h-3.5" />
-            </button>
-          </div>
-        </div>
-      </div>
-
-      {/* 2. Filter Pills & Live Search Bar */}
-      <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
-        {/* Category Filter Pills */}
-        <div className="flex items-center gap-1.5 overflow-x-auto pb-1 sm:pb-0 scrollbar-none">
-          <button
-            onClick={() => setActiveCategory('all')}
-            className={`apple-press px-3 py-1.5 rounded-xl text-xs font-bold transition-all shrink-0 ${
-              activeCategory === 'all'
-                ? 'bg-[#0F1115] text-white dark:bg-[#C6F432] dark:text-[#0A0D14] shadow-sm'
-                : 'bg-black/[0.04] hover:bg-black/[0.08] text-[#64748B] hover:text-[#0F1115] dark:bg-white/[0.06] dark:hover:bg-white/[0.1] dark:text-[#94A3B8] dark:hover:text-white'
-            }`}
-          >
-            All Files ({allFiles.length})
-          </button>
-
-          <button
-            onClick={() => setActiveCategory('folders')}
-            className={`apple-press px-3 py-1.5 rounded-xl text-xs font-bold transition-all shrink-0 ${
-              activeCategory === 'folders'
-                ? 'bg-[#0F1115] text-white dark:bg-[#C6F432] dark:text-[#0A0D14] shadow-sm'
-                : 'bg-black/[0.04] hover:bg-black/[0.08] text-[#64748B] hover:text-[#0F1115] dark:bg-white/[0.06] dark:hover:bg-white/[0.1] dark:text-[#94A3B8] dark:hover:text-white'
-            }`}
-          >
-            Folders ({folderCount})
-          </button>
-
-          <button
-            onClick={() => setActiveCategory('media')}
-            className={`apple-press px-3 py-1.5 rounded-xl text-xs font-bold transition-all shrink-0 ${
-              activeCategory === 'media'
-                ? 'bg-[#0F1115] text-white dark:bg-[#C6F432] dark:text-[#0A0D14] shadow-sm'
-                : 'bg-black/[0.04] hover:bg-black/[0.08] text-[#64748B] hover:text-[#0F1115] dark:bg-white/[0.06] dark:hover:bg-white/[0.1] dark:text-[#94A3B8] dark:hover:text-white'
-            }`}
-          >
-            Media ({mediaCount})
-          </button>
-
-          <button
-            onClick={() => setActiveCategory('docs')}
-            className={`apple-press px-3 py-1.5 rounded-xl text-xs font-bold transition-all shrink-0 ${
-              activeCategory === 'docs'
-                ? 'bg-[#0F1115] text-white dark:bg-[#C6F432] dark:text-[#0A0D14] shadow-sm'
-                : 'bg-black/[0.04] hover:bg-black/[0.08] text-[#64748B] hover:text-[#0F1115] dark:bg-white/[0.06] dark:hover:bg-white/[0.1] dark:text-[#94A3B8] dark:hover:text-white'
-            }`}
-          >
-            Docs ({docCount})
-          </button>
-        </div>
-
-        {/* Quick Search Input */}
-        <div className="relative sm:w-60 shrink-0">
-          <Search className="absolute left-3 top-2.5 w-3.5 h-3.5 text-[#64748B] dark:text-[#94A3B8]" />
-          <input
-            type="text"
-            placeholder="Filter vault..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            className="w-full bg-[#F8FAFC] dark:bg-[#181E2E] pl-8 pr-3 py-1.5 rounded-xl text-xs border border-black/[0.06] dark:border-white/[0.08] text-[#0F1115] dark:text-white placeholder-[#64748B] dark:placeholder-[#94A3B8] focus:outline-none focus:ring-1 focus:ring-[#0071E3] dark:focus:ring-[#C6F432] font-sans"
-          />
-        </div>
-      </div>
-
-      {/* 2.5 Bulk Selection & Actions Bar */}
-      {filteredFiles.length > 0 && (
-        <div className="flex items-center justify-between gap-3 px-3.5 py-2 rounded-2xl bg-black/[0.03] dark:bg-white/[0.04] border border-black/[0.04] dark:border-white/[0.06] transition-all">
-          <div className="flex items-center gap-2">
-            <button
-              onClick={toggleSelectAll}
-              className="apple-press flex items-center gap-2 text-xs font-semibold text-[#64748B] hover:text-[#0F1115] dark:text-[#94A3B8] dark:hover:text-white transition-colors"
-              title={selectedFiles.size === filteredFiles.length ? 'Deselect all' : 'Select all'}
-            >
-              {selectedFiles.size === filteredFiles.length && filteredFiles.length > 0 ? (
-                <CheckSquare className="w-4 h-4 text-[#0071E3] dark:text-[#C6F432]" />
-              ) : selectedFiles.size > 0 ? (
-                <MinusSquare className="w-4 h-4 text-[#0071E3] dark:text-[#C6F432]" />
-              ) : (
-                <Square className="w-4 h-4" />
-              )}
-              <span>
-                {selectedFiles.size === filteredFiles.length && filteredFiles.length > 0
-                  ? 'All Selected'
-                  : selectedFiles.size > 0
-                  ? `${selectedFiles.size} of ${filteredFiles.length} selected`
-                  : 'Select All'}
-              </span>
-            </button>
-          </div>
-
-          {selectedFiles.size > 0 && (
-            <div className="flex items-center gap-2">
               <button
-                onClick={() => setSelectedFiles(new Set())}
-                className="text-xs font-medium text-[#64748B] hover:text-[#0F1115] dark:text-[#94A3B8] dark:hover:text-white transition-colors px-2 py-1"
+                onClick={() => setViewMode('table')}
+                className="relative w-7 h-7 rounded-md flex items-center justify-center transition-colors"
+                style={{
+                  color: viewMode === 'table' ? 'var(--text-primary)' : 'var(--text-tertiary)',
+                }}
+                title="List view"
               >
-                Clear
+                {viewMode === 'table' && (
+                  <motion.div
+                    layoutId="vaultViewModePill"
+                    className="absolute inset-0 rounded-md"
+                    style={{ background: 'var(--surface)' }}
+                    transition={{ type: 'spring', stiffness: 520, damping: 36 }}
+                  />
+                )}
+                <List className="w-3.5 h-3.5 relative z-10" />
               </button>
               <button
-                onClick={() => setShowBulkConfirm(true)}
-                disabled={isBulkDeleting}
-                className="apple-press flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-red-500 hover:bg-red-600 text-white shadow-sm transition-all disabled:opacity-50"
+                onClick={() => setViewMode('grid')}
+                className="relative w-7 h-7 rounded-md flex items-center justify-center transition-colors"
+                style={{
+                  color: viewMode === 'grid' ? 'var(--text-primary)' : 'var(--text-tertiary)',
+                }}
+                title="Grid view"
               >
-                {isBulkDeleting ? (
-                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                ) : (
-                  <Trash2 className="w-3.5 h-3.5" />
+                {viewMode === 'grid' && (
+                  <motion.div
+                    layoutId="vaultViewModePill"
+                    className="absolute inset-0 rounded-md"
+                    style={{ background: 'var(--surface)' }}
+                    transition={{ type: 'spring', stiffness: 520, damping: 36 }}
+                  />
                 )}
-                <span>Delete Selected ({selectedFiles.size})</span>
+                <LayoutGrid className="w-3.5 h-3.5 relative z-10" />
               </button>
             </div>
           )}
+        </div>
+      </div>
+
+      {/* Filter Tabs + Search (only shown when files exist) */}
+      {allFiles.length > 0 && (
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div
+            className="flex items-center gap-4 border-b sm:border-b-0 overflow-x-auto scrollbar-none pb-1 sm:pb-0"
+            style={{ borderColor: 'var(--border)' }}
+          >
+            {(
+              [
+                { id: 'all', label: `All (${allFiles.length})` },
+                ...(folderCount > 0 ? [{ id: 'folders' as const, label: `Folders (${folderCount})` }] : []),
+                ...(mediaCount > 0 ? [{ id: 'media' as const, label: `Media (${mediaCount})` }] : []),
+                ...(docCount > 0 ? [{ id: 'docs' as const, label: `Docs (${docCount})` }] : []),
+              ] as { id: FilterCategory; label: string }[]
+            ).map((tab) => {
+              const active = activeCategory === tab.id;
+              return (
+                <button
+                  key={tab.id}
+                  onClick={() => setActiveCategory(tab.id)}
+                  className="relative pb-2 text-xs transition-colors shrink-0"
+                  style={{
+                    color: active ? 'var(--text-primary)' : 'var(--text-tertiary)',
+                    fontWeight: active ? 600 : 500,
+                  }}
+                >
+                  {tab.label}
+                  {active && (
+                    <motion.div
+                      layoutId="vaultFilterUnderline"
+                      className="absolute bottom-0 inset-x-0 h-0.5 rounded-full"
+                      style={{ background: 'var(--text-primary)' }}
+                      transition={{ type: 'spring', stiffness: 520, damping: 36 }}
+                    />
+                  )}
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="relative w-full sm:w-60 shrink-0">
+            <Search
+              className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5"
+              style={{ color: 'var(--text-tertiary)' }}
+            />
+            <input
+              type="text"
+              placeholder="Search files..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="ab-input pl-9 pr-3 h-9 text-xs"
+            />
+          </div>
         </div>
       )}
 
-      {/* 3. Slab Body: Balanced 2-Column Split (Files Stream on Left, Companion Deck on Right) */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start pt-2">
-        {/* Left Column: Files Table / Grid */}
-        <div className={companionDeck ? "lg:col-span-7 xl:col-span-7 space-y-3" : "lg:col-span-12 space-y-3"}>
-          {filteredFiles.length === 0 ? (
-            <div className="p-8 text-center rounded-2xl bg-[#F8FAFC] dark:bg-[#141926] border border-black/[0.04] dark:border-white/[0.04]">
-              <p className="font-display text-xs font-bold text-[#0F1115] dark:text-white">
-                {searchQuery ? 'No matching files found' : 'Vault is clean and ready'}
-              </p>
-              <p className="text-[11px] text-[#64748B] dark:text-[#94A3B8] mt-1 max-w-sm mx-auto">
-                Drop files or entire folders onto the AirDrop stage above to beam them across Wi-Fi.
-              </p>
-            </div>
-          ) : viewMode === 'table' ? (
-            /* Luxury Table Stream */
-            <div className="space-y-2">
-              {filteredFiles.map((file, idx) => {
-                const isDirectory = !!file.isDirectory;
-                const badge = getFileBadge(file.name, isDirectory);
-                const isThisDownloading = downloadingName === file.name;
-                const isSelected = selectedFiles.has(file.name);
-
-                return (
-                  <motion.div
-                    key={file.name}
-                    initial={{ opacity: 0, y: 2 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ duration: 0.15, delay: Math.min(idx * 0.02, 0.1) }}
-                    className={`p-3 sm:p-3.5 rounded-2xl border flex items-center justify-between gap-3 transition-colors group ${
-                      isSelected
-                        ? 'bg-[#0071E3]/5 dark:bg-[#C6F432]/10 border-[#0071E3]/30 dark:border-[#C6F432]/30 ring-1 ring-[#0071E3]/20 dark:ring-[#C6F432]/20'
-                        : 'bg-[#F8FAFC] hover:bg-[#F1F5F9] dark:bg-[#141926] dark:hover:bg-[#1A2030] border-black/[0.04] dark:border-white/[0.04]'
-                    }`}
-                  >
-                    {/* Icon + Name + Metadata */}
-                    <div className="flex items-center gap-2.5 sm:gap-3 min-w-0 flex-1">
-                      {/* Selection Checkbox */}
-                      <button
-                        onClick={() => toggleSelectFile(file.name)}
-                        className="p-1 -ml-1 rounded-lg text-[#64748B] hover:text-[#0F1115] dark:text-[#94A3B8] dark:hover:text-white transition-colors shrink-0"
-                        title={isSelected ? 'Deselect item' : 'Select item'}
-                      >
-                        {isSelected ? (
-                          <CheckSquare className="w-4 h-4 text-[#0071E3] dark:text-[#C6F432]" />
-                        ) : (
-                          <Square className="w-4 h-4 opacity-40 group-hover:opacity-100 transition-opacity" />
-                        )}
-                      </button>
-
-                      <div className="w-10 h-10 rounded-xl bg-white dark:bg-white/[0.06] border border-black/[0.06] dark:border-white/[0.08] shadow-xs flex items-center justify-center shrink-0">
-                        {isDirectory ? (
-                          <M3FolderIcon className="w-5 h-5 text-[#F59E0B]" />
-                        ) : (
-                          <M3DocumentIcon className="w-5 h-5 text-[#0071E3] dark:text-[#38BDF8]" />
-                        )}
-                      </div>
-
-                      <div className="min-w-0">
-                        <p className="font-display text-xs sm:text-sm font-bold text-[#0F1115] dark:text-white truncate tracking-tight">
-                          {file.name}
-                        </p>
-                        <div className="flex items-center gap-2 text-[10px] sm:text-[11px] text-[#64748B] dark:text-[#94A3B8] font-mono tabular-nums">
-                          <span className="font-bold text-[#0F1115] dark:text-white uppercase font-sans">
-                            {badge.label}
-                          </span>
-                          <span>•</span>
-                          {isDirectory ? (
-                            <span>{file.fileCount || 0} items ({formatBytes(file.size)})</span>
-                          ) : (
-                            <span>{formatBytes(file.size)}</span>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Status Pill Badge */}
-                    <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-[#10B981]/10 dark:bg-[#C6F432]/15 text-[#10B981] dark:text-[#C6F432] text-[10px] font-bold font-mono shrink-0">
-                      <CheckCircle2 className="w-3 h-3 text-inherit" />
-                      <span>{isDirectory ? 'FOLDER READY' : 'COMPLETE'}</span>
-                    </div>
-
-                    {/* Actions */}
-                    <div className="flex items-center gap-2 shrink-0">
-                      <button
-                        onClick={() => handleSafeDownload(file.path, isDirectory ? `${file.name}.zip` : file.name, file.size)}
-                        disabled={isThisDownloading}
-                        className="apple-press flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-[#0F1115] hover:bg-black text-white dark:bg-[#C6F432] dark:hover:bg-[#B5E22B] dark:text-[#0A0D14] shadow-sm transition-all disabled:opacity-50"
-                      >
-                        {isThisDownloading ? (
-                          <Loader2 className="w-3 h-3 animate-spin" />
-                        ) : (
-                          <Download className="w-3 h-3 text-inherit" />
-                        )}
-                        <span>{isDirectory ? 'Get ZIP' : 'Download'}</span>
-                      </button>
-
-                      {(isMac || isWindows || serverInfo?.isWindows) && (
-                        <button
-                          onClick={() => {
-                            handleOpenInFinder(file.name);
-                          }}
-                          className="apple-press hidden xs:flex p-1.5 rounded-xl text-[#64748B] hover:text-[#0F1115] dark:text-[#94A3B8] dark:hover:text-white hover:bg-black/[0.04] dark:hover:bg-white/[0.08] transition-colors"
-                          title={isWindows || serverInfo?.isWindows ? "Reveal in File Explorer" : "Reveal in Finder"}
-                        >
-                          <M3FolderIcon className="w-4 h-4 text-[#0071E3] dark:text-[#38BDF8]" />
-                        </button>
-                      )}
-
-                      <button
-                        onClick={() => setDeleteTarget({ name: file.name, isDirectory: file.isDirectory })}
-                        className="apple-press p-1.5 rounded-xl text-[#64748B] hover:text-red-500 dark:text-[#94A3B8] dark:hover:text-red-400 hover:bg-red-500/10 transition-colors"
-                        title={file.isDirectory ? "Delete folder" : "Delete file"}
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                  </motion.div>
-                );
-              })}
-            </div>
-          ) : (
-            /* Grid Card View */
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              {filteredFiles.map((file, idx) => {
-                const isDirectory = !!file.isDirectory;
-                const isImg = isImageFile(file.name, isDirectory);
-                const badge = getFileBadge(file.name, isDirectory);
-                const isThisDownloading = downloadingName === file.name;
-                const isSelected = selectedFiles.has(file.name);
-
-                return (
-                  <motion.div
-                    key={file.name}
-                    initial={{ opacity: 0, y: 2 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ duration: 0.15, delay: Math.min(idx * 0.02, 0.1) }}
-                    className={`rounded-2xl p-3.5 border flex flex-col justify-between transition-colors group ${
-                      isSelected
-                        ? 'bg-[#0071E3]/5 dark:bg-[#C6F432]/10 border-[#0071E3]/30 dark:border-[#C6F432]/30 ring-1 ring-[#0071E3]/20 dark:ring-[#C6F432]/20'
-                        : 'bg-[#F8FAFC] hover:bg-[#F1F5F9] dark:bg-[#141926] dark:hover:bg-[#1A2030] border-black/[0.04] dark:border-white/[0.04]'
-                    }`}
-                  >
-                    {isImg && (
-                      <div
-                        onClick={() => {
-                          setPreviewImage(file.path);
-                        }}
-                        className="relative w-full h-28 mb-2.5 rounded-xl overflow-hidden bg-black/[0.04] dark:bg-black/40 cursor-pointer border border-black/[0.06] dark:border-white/[0.06]"
-                      >
-                        <img
-                          src={file.path}
-                          alt={file.name}
-                          className="w-full h-full object-cover transition-transform duration-200 group-hover:scale-105"
-                          loading="lazy"
-                        />
-                      </div>
-                    )}
-
-                    <div className="flex items-start gap-2.5 min-w-0">
-                      {/* Selection Checkbox */}
-                      <button
-                        onClick={() => toggleSelectFile(file.name)}
-                        className="p-1 -ml-1 mt-0.5 rounded-lg text-[#64748B] hover:text-[#0F1115] dark:text-[#94A3B8] dark:hover:text-white transition-colors shrink-0"
-                        title={isSelected ? 'Deselect item' : 'Select item'}
-                      >
-                        {isSelected ? (
-                          <CheckSquare className="w-4 h-4 text-[#0071E3] dark:text-[#C6F432]" />
-                        ) : (
-                          <Square className="w-4 h-4 opacity-40 group-hover:opacity-100 transition-opacity" />
-                        )}
-                      </button>
-
-                      <div className="shrink-0 p-2 rounded-xl bg-white dark:bg-white/[0.06] border border-black/[0.04] dark:border-transparent">
-                        {isDirectory ? (
-                          <M3FolderIcon className="w-5 h-5 text-[#F59E0B]" />
-                        ) : (
-                          <M3DocumentIcon className="w-5 h-5 text-[#0071E3] dark:text-[#38BDF8]" />
-                        )}
-                      </div>
-
-                      <div className="min-w-0 flex-1">
-                        <p className="text-xs font-bold text-[#0F1115] dark:text-white truncate tracking-tight" title={file.name}>
-                          {file.name}
-                        </p>
-                        <div className="flex items-center gap-1.5 mt-0.5 text-[10px] text-[#64748B] dark:text-[#94A3B8] font-mono tabular-nums">
-                          <span className="font-semibold text-[#0F1115] dark:text-white uppercase font-sans">
-                            {badge.label}
-                          </span>
-                          <span>•</span>
-                          {isDirectory ? (
-                            <span>{file.fileCount || 0} items ({formatBytes(file.size)})</span>
-                          ) : (
-                            <span>{formatBytes(file.size)}</span>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="mt-3 pt-2.5 border-t border-black/[0.04] dark:border-white/[0.06] flex items-center justify-between gap-1.5">
-                      <button
-                        onClick={() => handleSafeDownload(file.path, isDirectory ? `${file.name}.zip` : file.name, file.size)}
-                        disabled={isThisDownloading}
-                        className="apple-press flex items-center gap-1.5 px-3 py-1 rounded-xl text-xs font-bold bg-[#0F1115] hover:bg-black text-white dark:bg-[#C6F432] dark:hover:bg-[#B5E22B] dark:text-[#0A0D14] shadow-sm transition-all disabled:opacity-50"
-                      >
-                        {isThisDownloading ? (
-                          <Loader2 className="w-3 h-3 animate-spin" />
-                        ) : (
-                          <Download className="w-3 h-3" />
-                        )}
-                        <span>{isDirectory ? 'Get ZIP' : 'Download'}</span>
-                      </button>
-
-                      <button
-                        onClick={() => setDeleteTarget({ name: file.name, isDirectory: file.isDirectory })}
-                        className="apple-press p-1.5 rounded-xl text-[#64748B] hover:text-red-500 dark:text-[#94A3B8] dark:hover:text-red-400 transition-colors"
-                        title={isDirectory ? "Delete folder" : "Delete file"}
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                  </motion.div>
-                );
-              })}
-            </div>
-          )}
-        </div>
-
-        {/* Right Column: Companion Control Deck */}
-        {companionDeck && (
-          <div className="lg:col-span-5 xl:col-span-5 w-full">
-            {companionDeck}
-          </div>
-        )}
-      </div>
-
-      {/* Full-Screen Image Preview Modal */}
+      {/* Contextual Bulk Action Bar */}
       <AnimatePresence>
-        {previewImage && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            onClick={() => setPreviewImage(null)}
-            className="fixed inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-4"
+      {selectedFiles.size > 0 && (
+        <motion.div
+          initial={{ opacity: 0, y: -6 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: -6 }}
+          transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
+          className="flex flex-wrap items-center justify-between gap-2 px-3.5 py-2 rounded-xl"
+          style={{ background: 'var(--accent-soft)', border: '1px solid var(--border)' }}
+        >
+          <button
+            onClick={toggleSelectAll}
+            className="flex items-center gap-2 text-xs font-medium"
+            style={{ color: 'var(--text-primary)' }}
           >
-            <motion.div
-              initial={{ scale: 0.95 }}
-              animate={{ scale: 1 }}
-              exit={{ scale: 0.95 }}
-              onClick={(e) => e.stopPropagation()}
-              className="max-w-4xl max-h-[85vh] rounded-3xl overflow-hidden bg-black/50 border border-white/20 shadow-2xl relative"
+            <CheckSquare className="w-4 h-4 shrink-0" style={{ color: 'var(--accent)' }} />
+            <span>{selectedFiles.size} of {filteredFiles.length} selected</span>
+          </button>
+
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setSelectedFiles(new Set())}
+              className="text-xs font-medium px-2 py-1"
+              style={{ color: 'var(--text-secondary)' }}
             >
-              <img
-                src={previewImage}
-                alt="Full preview"
-                className="w-full h-full object-contain max-h-[80vh]"
-              />
-              <button
-                onClick={() => setPreviewImage(null)}
-                className="apple-press absolute top-4 right-4 p-2 rounded-full bg-black/60 text-white hover:bg-black/80 transition-colors"
-              >
-                X
-              </button>
-            </motion.div>
-          </motion.div>
-        )}
+              Clear
+            </button>
+            <button
+              onClick={() => setShowBulkConfirm(true)}
+              disabled={isBulkDeleting}
+              className="apple-press flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-rose-600 hover:bg-rose-700 text-white disabled:opacity-50"
+            >
+              {isBulkDeleting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
+              <span>Delete ({selectedFiles.size})</span>
+            </button>
+          </div>
+        </motion.div>
+      )}
       </AnimatePresence>
 
-      {/* Website-Grade Custom Confirmation Modal */}
+      {/* File List or Grid */}
+      {filteredFiles.length === 0 ? (
+        <div className="py-10 text-center rounded-2xl" style={{ border: '1px solid var(--border)' }}>
+          <p className="text-sm font-medium" style={{ color: 'var(--text-secondary)' }}>
+            {searchQuery ? 'No matching files' : 'No shared files yet'}
+          </p>
+          <p className="text-xs mt-1" style={{ color: 'var(--text-tertiary)' }}>
+            Drop files or folders above to transfer across devices
+          </p>
+        </div>
+      ) : viewMode === 'table' ? (
+        <div className="rounded-2xl overflow-hidden divide-y" style={{ border: '1px solid var(--border)', borderColor: 'var(--border)' }}>
+          {filteredFiles.map((file) => {
+            const isDirectory = !!file.isDirectory;
+            const badge = getFileBadge(file.name, isDirectory);
+            const isThisDownloading = downloadingName === file.name;
+            const isSelected = selectedFiles.has(file.name);
+
+            return (
+              <div
+                key={file.name}
+                className="px-3 sm:px-4 py-2.5 sm:py-3 flex items-center justify-between gap-2 sm:gap-3 transition-colors group"
+                style={{
+                  background: isSelected ? 'var(--accent-soft)' : 'var(--surface)',
+                  borderColor: 'var(--border)',
+                }}
+              >
+                <div className="flex items-center gap-2 sm:gap-3 min-w-0 flex-1">
+                  <button
+                    onClick={() => toggleSelectFile(file.name)}
+                    className={`w-6 h-6 flex items-center justify-center rounded-md transition-opacity shrink-0 ${
+                      isSelected ? 'opacity-100' : 'opacity-40 group-hover:opacity-100'
+                    }`}
+                    style={{ color: isSelected ? 'var(--accent)' : 'var(--text-tertiary)' }}
+                    title={isSelected ? 'Deselect' : 'Select'}
+                  >
+                    {isSelected ? <CheckSquare className="w-4 h-4" /> : <Square className="w-4 h-4" />}
+                  </button>
+
+                  <div
+                    className="w-8 h-8 sm:w-9 sm:h-9 rounded-lg flex items-center justify-center shrink-0"
+                    style={{ background: 'var(--surface-alt)', border: '1px solid var(--border)' }}
+                  >
+                    {isDirectory ? (
+                      <M3FolderIcon className="w-4 h-4 text-amber-500" />
+                    ) : (
+                      <M3DocumentIcon className="w-4 h-4" style={{ color: 'var(--accent)' }} />
+                    )}
+                  </div>
+
+                  <div
+                    onClick={() => {
+                      if (isPreviewableFile(file.name, isDirectory)) setPreviewFile(file);
+                    }}
+                    className={`min-w-0 flex-1 ${isPreviewableFile(file.name, isDirectory) ? 'cursor-pointer' : ''}`}
+                  >
+                    <p className="font-display text-xs sm:text-sm font-semibold truncate" style={{ color: 'var(--text-primary)' }}>
+                      {file.name}
+                    </p>
+                    <div className="flex items-center gap-1.5 text-[11px] font-mono tabular-nums truncate" style={{ color: 'var(--text-tertiary)' }}>
+                      <span>{badge.label}</span>
+                      <span>·</span>
+                      {isDirectory ? (
+                        <span className="truncate">
+                          {file.fileCount || 0} items · {formatBytes(file.size)}
+                        </span>
+                      ) : (
+                        <span>{formatBytes(file.size)}</span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-1 shrink-0">
+                  {isPreviewableFile(file.name, isDirectory) && (
+                    <button
+                      onClick={() => setPreviewFile(file)}
+                      className="apple-press w-8 h-8 rounded-lg flex items-center justify-center transition-colors"
+                      style={{ color: 'var(--text-secondary)' }}
+                      title="Preview"
+                    >
+                      <Eye className="w-4 h-4" />
+                    </button>
+                  )}
+
+                  <button
+                    onClick={() => handleSafeDownload(file.path, isDirectory ? `${file.name}.zip` : file.name, file.size)}
+                    disabled={isThisDownloading}
+                    className="ab-btn ab-btn-primary h-8 px-2.5 sm:px-3 text-xs"
+                  >
+                    {isThisDownloading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
+                    <span className="hidden sm:inline">{isDirectory ? 'ZIP' : 'Save'}</span>
+                  </button>
+
+                  {(isMac || isWindows || serverInfo?.isWindows) && (
+                    <button
+                      onClick={() => handleOpenInFinder(file.name)}
+                      className="apple-press hidden md:flex w-8 h-8 rounded-lg items-center justify-center transition-colors"
+                      style={{ color: 'var(--text-secondary)' }}
+                      title={isWindows || serverInfo?.isWindows ? 'Reveal in Explorer' : 'Reveal in Finder'}
+                    >
+                      <FolderOpen className="w-4 h-4" />
+                    </button>
+                  )}
+
+                  <button
+                    onClick={() => setDeleteTarget({ name: file.name, isDirectory: file.isDirectory })}
+                    className="apple-press w-8 h-8 rounded-lg flex items-center justify-center text-[#9CA3AF] hover:text-rose-500 transition-colors"
+                    title={file.isDirectory ? 'Delete folder' : 'Delete file'}
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+          {filteredFiles.map((file) => {
+            const isDirectory = !!file.isDirectory;
+            const isImg = isImageFile(file.name, isDirectory) && !brokenImages.has(file.name);
+            const badge = getFileBadge(file.name, isDirectory);
+            const isThisDownloading = downloadingName === file.name;
+            const isSelected = selectedFiles.has(file.name);
+
+            return (
+              <div
+                key={file.name}
+                className="rounded-xl p-3.5 flex flex-col justify-between transition-colors"
+                style={{
+                  background: isSelected ? 'var(--accent-soft)' : 'var(--surface-alt)',
+                  border: `1px solid ${isSelected ? 'var(--accent)' : 'var(--border)'}`,
+                }}
+              >
+                {/* Uniform Visual Top Preview Area (Thumbnail or Folder/File Emblem) */}
+                {isImg ? (
+                  <div
+                    onClick={() => setPreviewFile(file)}
+                    className="relative w-full h-28 mb-3 rounded-lg overflow-hidden cursor-pointer bg-black/5 dark:bg-black/20"
+                    style={{ border: '1px solid var(--border)' }}
+                  >
+                    <img
+                      src={file.path}
+                      alt={file.name}
+                      className="w-full h-full object-cover"
+                      loading="lazy"
+                      onError={() => {
+                        setBrokenImages((prev) => {
+                          const next = new Set(prev);
+                          next.add(file.name);
+                          return next;
+                        });
+                      }}
+                    />
+                  </div>
+                ) : (
+                  <div
+                    onClick={() => {
+                      if (isPreviewableFile(file.name, isDirectory)) setPreviewFile(file);
+                    }}
+                    className={`relative w-full h-28 mb-3 rounded-lg flex flex-col items-center justify-center gap-1.5 ${
+                      isPreviewableFile(file.name, isDirectory) ? 'cursor-pointer' : ''
+                    }`}
+                    style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}
+                  >
+                    {isDirectory ? (
+                      <M3FolderIcon className="w-7 h-7 text-amber-500" />
+                    ) : (
+                      <M3DocumentIcon className="w-7 h-7" style={{ color: 'var(--accent)' }} />
+                    )}
+                    <span
+                      className="text-[11px] font-mono font-semibold px-2 py-0.5 rounded-full"
+                      style={{ background: 'var(--surface-alt)', color: 'var(--text-secondary)' }}
+                    >
+                      {formatBytes(file.size)}
+                    </span>
+                  </div>
+                )}
+
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <button
+                    onClick={() => toggleSelectFile(file.name)}
+                    className="w-5 h-5 flex items-center justify-center shrink-0"
+                    style={{ color: isSelected ? 'var(--accent)' : 'var(--text-tertiary)' }}
+                    title={isSelected ? 'Deselect' : 'Select'}
+                  >
+                    {isSelected ? <CheckSquare className="w-4 h-4" /> : <Square className="w-4 h-4 opacity-50" />}
+                  </button>
+
+                  <div className="min-w-0 flex-1">
+                    <p className="text-xs font-semibold truncate" style={{ color: 'var(--text-primary)' }} title={file.name}>
+                      {file.name}
+                    </p>
+                    <p className="text-[11px] font-mono tabular-nums mt-0.5 truncate" style={{ color: 'var(--text-tertiary)' }}>
+                      {badge.label} ·{' '}
+                      {isDirectory
+                        ? `${file.fileCount || 0} items · ${formatBytes(file.size)}`
+                        : formatBytes(file.size)}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="mt-3 pt-2.5 flex items-center justify-between gap-2" style={{ borderTop: '1px solid var(--border)' }}>
+                  <button
+                    onClick={() => handleSafeDownload(file.path, isDirectory ? `${file.name}.zip` : file.name, file.size)}
+                    disabled={isThisDownloading}
+                    className="ab-btn ab-btn-primary h-8 px-3 text-xs"
+                  >
+                    {isThisDownloading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
+                    <span>{isDirectory ? 'ZIP' : 'Save'}</span>
+                  </button>
+
+                  <div className="flex items-center gap-1">
+                    {isPreviewableFile(file.name, isDirectory) && (
+                      <button
+                        onClick={() => setPreviewFile(file)}
+                        className="apple-press w-8 h-8 rounded-lg flex items-center justify-center"
+                        style={{ color: 'var(--text-secondary)' }}
+                        title="Preview"
+                      >
+                        <Eye className="w-4 h-4" />
+                      </button>
+                    )}
+                    <button
+                      onClick={() => setDeleteTarget({ name: file.name, isDirectory: file.isDirectory })}
+                      className="apple-press w-8 h-8 rounded-lg flex items-center justify-center text-[#9CA3AF] hover:text-rose-500 transition-colors"
+                      title="Delete"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      <FilePreviewModal
+        file={previewFile}
+        files={filteredFiles}
+        onSelectFile={setPreviewFile}
+        onDownload={(f) => handleSafeDownload(f.path, f.isDirectory ? `${f.name}.zip` : f.name, f.size)}
+        onClose={() => setPreviewFile(null)}
+        showToast={showToast}
+      />
+
       <ConfirmModal
         isOpen={!!deleteTarget}
         title={deleteTarget?.isDirectory ? 'Delete Folder?' : 'Delete File?'}
         message={
           deleteTarget?.isDirectory
-            ? 'Are you sure you want to delete this folder? All files and nested items inside will be permanently erased.'
-            : 'Are you sure you want to permanently delete this file from AirBridge storage?'
+            ? 'All nested files inside this folder will be permanently erased.'
+            : 'This file will be permanently removed from AirBridge storage.'
         }
         itemName={deleteTarget?.name}
         itemType={deleteTarget?.isDirectory ? 'folder' : 'file'}
         confirmLabel={deleteTarget?.isDirectory ? 'Delete Folder' : 'Delete File'}
         onConfirm={() => {
-          if (deleteTarget) {
-            executeDelete(deleteTarget.name);
-          }
+          if (deleteTarget) executeDelete(deleteTarget.name);
         }}
         onClose={() => setDeleteTarget(null)}
       />
 
-      {/* Bulk Delete Custom Confirmation Modal */}
       <ConfirmModal
         isOpen={showBulkConfirm}
         title={`Delete ${selectedFiles.size} Item${selectedFiles.size === 1 ? '' : 's'}?`}
-        message={`Are you sure you want to permanently delete ${selectedFiles.size} selected item(s) from AirBridge storage? This cannot be undone.`}
+        message={`Permanently delete ${selectedFiles.size} selected item(s) from AirBridge storage?`}
         itemName={`${selectedFiles.size} selected items`}
         itemType="file"
-        confirmLabel={isBulkDeleting ? 'Deleting...' : `Delete ${selectedFiles.size} Items`}
+        confirmLabel={isBulkDeleting ? 'Deleting...' : `Delete ${selectedFiles.size}`}
         onConfirm={executeBulkDelete}
         onClose={() => setShowBulkConfirm(false)}
       />

@@ -22,7 +22,7 @@ export const RingingModal: React.FC<RingingModalProps> = ({
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
           transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
-          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xl"
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#090C12]/65 backdrop-blur-xl"
         >
           <motion.div 
             key="ringing-modal"
@@ -30,7 +30,7 @@ export const RingingModal: React.FC<RingingModalProps> = ({
             animate={{ opacity: 1, scale: 1, filter: 'blur(0px)', y: 0 }}
             exit={{ opacity: 0, scale: 0.97, filter: 'blur(3px)', y: 4 }}
             transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
-            className="relative w-full max-w-sm bg-white dark:bg-[#13151B] border-2 border-red-500/40 rounded-3xl p-7 text-center text-[#0F1115] dark:text-[#F3F4F6] shadow-2xl transition-colors"
+            className="bento-modal max-w-sm border-2 border-red-500/45 p-7 text-center"
           >
             {/* Pulsing Alert Icon */}
             <motion.div 

@@ -41,6 +41,13 @@ class StateStore {
         pin: String(Math.floor(1000 + Math.random() * 9000)),
         requireApproval: false, // When true, host must explicitly approve each non-host peer
       },
+      roomSettings: {
+        roomName: 'AirBridge Room',
+        maxParticipants: 0, // 0 = Unlimited, 1-100 = cap on connected unique devices
+        allowUploads: true,
+        allowChat: true,
+        allowClipboard: true,
+      },
       approvedDevices: [], // Array of approved device IDs: ['dev_xxx', ...]
       pendingApprovalRequests: [], // Array of pending requests: [{ id, name, ip, os, requestedAt }]
     };
@@ -111,6 +118,24 @@ class StateStore {
         }
         this.state.officeSecurity.requireApproval = Boolean(parsed.officeSecurity.requireApproval);
       }
+      if (parsed.roomSettings && typeof parsed.roomSettings === 'object') {
+        if (typeof parsed.roomSettings.roomName === 'string' && parsed.roomSettings.roomName.trim()) {
+          this.state.roomSettings.roomName = parsed.roomSettings.roomName.trim().slice(0, 40);
+        }
+        const maxP = parseInt(parsed.roomSettings.maxParticipants, 10);
+        if (!isNaN(maxP) && maxP >= 0 && maxP <= 100) {
+          this.state.roomSettings.maxParticipants = maxP;
+        }
+        if (typeof parsed.roomSettings.allowUploads === 'boolean') {
+          this.state.roomSettings.allowUploads = parsed.roomSettings.allowUploads;
+        }
+        if (typeof parsed.roomSettings.allowChat === 'boolean') {
+          this.state.roomSettings.allowChat = parsed.roomSettings.allowChat;
+        }
+        if (typeof parsed.roomSettings.allowClipboard === 'boolean') {
+          this.state.roomSettings.allowClipboard = parsed.roomSettings.allowClipboard;
+        }
+      }
       console.log(`[StateStore] Loaded state: ${this.state.chatHistory.length} chats, ${this.state.clipboardHistory.length} clipboard items, ${this.state.approvedDevices.length} approved devices.`);
     } catch (err) {
       if (err.code !== 'ENOENT') {
@@ -143,6 +168,13 @@ class StateStore {
             enabled: Boolean(this.state.officeSecurity?.enabled),
             pin: String(this.state.officeSecurity?.pin || ''),
             requireApproval: Boolean(this.state.officeSecurity?.requireApproval),
+          },
+          roomSettings: {
+            roomName: String(this.state.roomSettings?.roomName || 'AirBridge Room'),
+            maxParticipants: Number(this.state.roomSettings?.maxParticipants) || 0,
+            allowUploads: this.state.roomSettings?.allowUploads !== false,
+            allowChat: this.state.roomSettings?.allowChat !== false,
+            allowClipboard: this.state.roomSettings?.allowClipboard !== false,
           },
         }, null, 2);
 

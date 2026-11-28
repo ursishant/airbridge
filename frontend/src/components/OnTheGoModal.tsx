@@ -36,7 +36,7 @@ export const OnTheGoModal: React.FC<OnTheGoModalProps> = ({
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
           transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
-          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xl"
+          className="bento-modal-backdrop z-50 flex items-center justify-center p-4"
           onClick={onClose}
         >
           <motion.div 
@@ -45,7 +45,7 @@ export const OnTheGoModal: React.FC<OnTheGoModalProps> = ({
             animate={{ opacity: 1, scale: 1, filter: 'blur(0px)', y: 0 }}
             exit={{ opacity: 0, scale: 0.97, filter: 'blur(3px)', y: 4 }}
             transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
-            className="relative w-full max-w-xl bg-white dark:bg-[#13151B] border border-black/[0.08] dark:border-white/[0.08] rounded-3xl shadow-2xl p-6 sm:p-7 text-[#0F1115] dark:text-[#F3F4F6] max-h-[90vh] overflow-y-auto transition-colors"
+            className="bento-modal max-w-xl p-6 sm:p-7 max-h-[90vh] overflow-y-auto transition-colors"
             onClick={(e) => e.stopPropagation()}
           >
             {/* Close Button */}
@@ -71,40 +71,40 @@ export const OnTheGoModal: React.FC<OnTheGoModalProps> = ({
             </div>
 
             {/* Segmented Control */}
-            <div className="grid grid-cols-3 gap-1 bg-black/[0.05] dark:bg-white/[0.06] p-1 rounded-2xl mb-6 text-xs font-semibold">
+            <div className="grid grid-cols-3 gap-1 bg-[#EEF1F5] dark:bg-[#141821] p-1 rounded-xl mb-6 text-xs font-medium border border-[#E2E8F0] dark:border-white/[0.08]">
               <button
                 onClick={() => setActiveSubTab('install')}
-                className={`apple-press relative py-2 px-3 rounded-xl transition-all flex items-center justify-center gap-1.5 ${
+                className={`apple-press relative py-2 px-3 rounded-lg transition-colors flex items-center justify-center gap-1.5 ${
                   activeSubTab === 'install'
-                    ? 'bg-white dark:bg-[#1F222C] text-[#0F1115] dark:text-white shadow-sm'
-                    : 'text-[#64748B] dark:text-[#94A3B8] hover:text-[#0F1115] dark:hover:text-white'
+                    ? 'bg-[#111827] text-white dark:bg-[#F8FAFC] dark:text-[#0B0D11] font-semibold'
+                    : 'text-[#64748B] dark:text-[#94A3B8] hover:text-[#0F172A] dark:hover:text-white'
                 }`}
               >
-                <Download className="w-3.5 h-3.5 text-[#0071E3] dark:text-[#38BDF8]" />
+                <Download className="w-3.5 h-3.5" />
                 <span className="font-display">Install Apps</span>
               </button>
 
               <button
                 onClick={() => setActiveSubTab('hotspot')}
-                className={`apple-press relative py-2 px-3 rounded-xl transition-all flex items-center justify-center gap-1.5 ${
+                className={`apple-press relative py-2 px-3 rounded-lg transition-colors flex items-center justify-center gap-1.5 ${
                   activeSubTab === 'hotspot'
-                    ? 'bg-white dark:bg-[#1F222C] text-[#0F1115] dark:text-white shadow-sm'
-                    : 'text-[#64748B] dark:text-[#94A3B8] hover:text-[#0F1115] dark:hover:text-white'
+                    ? 'bg-[#111827] text-white dark:bg-[#F8FAFC] dark:text-[#0B0D11] font-semibold'
+                    : 'text-[#64748B] dark:text-[#94A3B8] hover:text-[#0F172A] dark:hover:text-white'
                 }`}
               >
-                <Radio className="w-3.5 h-3.5 text-[#10B981] dark:text-[#34D399]" />
+                <Radio className="w-3.5 h-3.5" />
                 <span className="font-display">Hotspot Mode</span>
               </button>
 
               <button
                 onClick={() => setActiveSubTab('usb')}
-                className={`apple-press relative py-2 px-3 rounded-xl transition-all flex items-center justify-center gap-1.5 ${
+                className={`apple-press relative py-2 px-3 rounded-lg transition-colors flex items-center justify-center gap-1.5 ${
                   activeSubTab === 'usb'
-                    ? 'bg-white dark:bg-[#1F222C] text-[#0F1115] dark:text-white shadow-sm'
-                    : 'text-[#64748B] dark:text-[#94A3B8] hover:text-[#0F1115] dark:hover:text-white'
+                    ? 'bg-[#111827] text-white dark:bg-[#F8FAFC] dark:text-[#0B0D11] font-semibold'
+                    : 'text-[#64748B] dark:text-[#94A3B8] hover:text-[#0F172A] dark:hover:text-white'
                 }`}
               >
-                <Cable className="w-3.5 h-3.5 text-[#8B5CF6] dark:text-[#A78BFA]" />
+                <Cable className="w-3.5 h-3.5" />
                 <span className="font-display">USB Cable</span>
               </button>
             </div>
@@ -248,7 +248,7 @@ export const OnTheGoModal: React.FC<OnTheGoModalProps> = ({
             {/* Done Button */}
             <button
               onClick={onClose}
-              className="apple-press mt-6 w-full py-2.5 px-4 rounded-2xl font-bold text-xs sm:text-sm bg-[#0F1115] hover:bg-black text-white dark:bg-white dark:hover:bg-slate-100 dark:text-[#0B0D13] shadow-sm transition-colors"
+              className="bento-btn-primary mt-6 w-full py-3 px-4 text-xs sm:text-sm"
             >
               Got it
             </button>

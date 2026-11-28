@@ -15,6 +15,14 @@ export interface ConnectedDevice {
   } | null;
 }
 
+export interface RoomSettings {
+  roomName: string;
+  maxParticipants: number;
+  allowUploads: boolean;
+  allowChat: boolean;
+  allowClipboard: boolean;
+}
+
 export interface ServerInfo {
   primaryIp: string;
   allIps: Array<{ interface: string; address: string; isWifi: boolean }>;
@@ -28,6 +36,7 @@ export interface ServerInfo {
   isMac?: boolean;
   isLinux?: boolean;
   isHost?: boolean;
+  roomSettings?: RoomSettings;
   officeSecurity?: {
     enabled: boolean;
     requiresAuth: boolean;
@@ -113,6 +122,14 @@ export function useWebSocket() {
 
   const [isOfficeLocked, setIsOfficeLocked] = useState(false);
   const [officeSecurityEnabled, setOfficeSecurityEnabled] = useState(false);
+  const [roomSettings, setRoomSettings] = useState<RoomSettings>({
+    roomName: 'AirBridge Room',
+    maxParticipants: 0,
+    allowUploads: true,
+    allowChat: true,
+    allowClipboard: true,
+  });
+  const [roomFullInfo, setRoomFullInfo] = useState<{ maxParticipants: number; currentCount: number; message: string } | null>(null);
   const officePinRef = useRef(officePin);
   officePinRef.current = officePin;
   
@@ -348,7 +365,34 @@ export function useWebSocket() {
               break;
             }
 
+            case 'room_settings_updated': {
+              if (data.roomSettings && typeof data.roomSettings === 'object') {
+                setRoomSettings(data.roomSettings);
+                setServerInfo((prev) => prev ? { ...prev, roomSettings: data.roomSettings } : prev);
+              }
+              break;
+            }
+
+            case 'room_full': {
+              setRoomFullInfo({
+                maxParticipants: Number(data.maxParticipants) || 0,
+                currentCount: Number(data.currentCount) || 0,
+                message: data.message || 'Room is full',
+              });
+              showToast(data.message || 'Room is full', 'error');
+              break;
+            }
+
+            case 'device_kicked': {
+              showToast(data.message || 'Removed from room by host', 'warning');
+              break;
+            }
+
             case 'init': {
+              setRoomFullInfo(null);
+              if (data.roomSettings && typeof data.roomSettings === 'object') {
+                setRoomSettings(data.roomSettings);
+              }
               const secEnabled = Boolean(data.officeSecurity?.enabled);
               setOfficeSecurityEnabled(secEnabled);
               if (!secEnabled || data.isHost) {
@@ -568,9 +612,12 @@ export function useWebSocket() {
         }
       };
 
-      ws.onclose = () => {
+      ws.onclose = (ev) => {
         setIsConnected(false);
         wsRef.current = null;
+        if (ev?.code === 4003 || ev?.code === 4004) {
+          return;
+        }
         if (!reconnectTimeoutRef.current) {
           reconnectTimeoutRef.current = setTimeout(connect, 3000);
         }
@@ -594,6 +641,9 @@ export function useWebSocket() {
       .then((res) => res.json())
       .then((info) => {
         setServerInfo(info);
+        if (info.roomSettings && typeof info.roomSettings === 'object') {
+          setRoomSettings(info.roomSettings);
+        }
         if (info.isHost) {
           setIsOfficeLocked(false);
           if (info.hostToken) {
@@ -684,10 +734,7 @@ export function useWebSocket() {
   const configureOfficeSecurity = useCallback(async (enabled: boolean, newPin?: string, requireApproval?: boolean): Promise<boolean> => {
     try {
       const pinToSend = newPin || officePinRef.current;
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      if (officePinRef.current) {
-        headers['x-airbridge-pin'] = officePinRef.current;
-      }
+      const headers = getAuthHeaders({ 'Content-Type': 'application/json' });
       const res = await fetch('/api/office/configure', {
         method: 'POST',
         headers,
@@ -885,6 +932,58 @@ export function useWebSocket() {
     fetch('/api/chat/clear', { method: 'POST', headers }).catch(() => {});
   }, []);
 
+  // Customizable Room Settings (Room Name, Member Limit, Permissions)
+  const updateRoomSettings = useCallback(async (patch: Partial<RoomSettings>): Promise<boolean> => {
+    // Optimistically apply immediately so rapid stepper/preset clicks never flash stale values
+    setRoomSettings((prev) => ({ ...prev, ...patch }));
+    try {
+      const headers = getAuthHeaders({ 'Content-Type': 'application/json' });
+      const res = await fetch('/api/office/room-settings', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(patch),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.roomSettings) {
+        setRoomSettings(data.roomSettings);
+        setServerInfo((prev) => (prev ? { ...prev, roomSettings: data.roomSettings } : prev));
+        return true;
+      }
+      showToast(data.error || 'Failed to update room settings', 'error');
+      return false;
+    } catch (_) {
+      showToast('Failed to update room settings', 'error');
+      return false;
+    }
+  }, [showToast]);
+
+  // Kick/Disconnect participant from room (Host-only)
+  const kickDevice = useCallback(async (deviceId: string): Promise<boolean> => {
+    try {
+      const headers = getAuthHeaders({ 'Content-Type': 'application/json' });
+      const res = await fetch('/api/office/kick-device', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ deviceId }),
+      });
+      if (res.ok) {
+        showToast('Participant removed from room', 'info');
+        return true;
+      }
+      const data = await res.json().catch(() => ({}));
+      showToast(data.error || 'Failed to remove participant', 'error');
+      return false;
+    } catch (_) {
+      showToast('Failed to remove participant', 'error');
+      return false;
+    }
+  }, [showToast]);
+
+  const retryConnection = useCallback(() => {
+    setRoomFullInfo(null);
+    connect();
+  }, [connect]);
+
   return {
     isConnected,
     devices,
@@ -892,6 +991,11 @@ export function useWebSocket() {
     deviceName,
     updateDeviceName,
     serverInfo,
+    roomSettings,
+    roomFullInfo,
+    updateRoomSettings,
+    kickDevice,
+    retryConnection,
     isAndroid,
     isMac,
     isWindows,

@@ -25,6 +25,13 @@ const {
   createRequireOfficeAuth,
   getCookie,
   verifySessionToken,
+  getNormalizedRemoteAddress,
+  getPinLockoutInfo,
+  recordFailedPinAttempt,
+  resetPinAttempts,
+  verifyPinTimingSafe,
+  registerActiveDeviceIp,
+  unregisterActiveDeviceIp,
 } = require('./middleware/auth');
 
 const { createInfoRouter } = require('./routes/info');
@@ -322,28 +329,105 @@ wss.on('error', (err) => {
 
 const connectedClients = new Map();
 
-// Helper to broadcast WebSocket messages
+const MAX_WS_CLIENTS = 200;
+const MAX_WS_PER_IP = 25;
+
+// Helper to broadcast WebSocket messages respecting auth, host-only events, and targeted privacy
 function broadcast(message, excludeWs = null) {
-  if (message && message.type === 'device_approval_resolved') {
+  if (!message || typeof message !== 'object') return;
+  const state = stateStore.getState();
+  const isSecEnabled = Boolean(state.officeSecurity?.enabled);
+
+  if (message.type === 'device_approval_resolved') {
     for (const [clientWs, info] of connectedClients.entries()) {
       if (info && info.id === message.deviceId) {
         clientWs.isAuthenticated = Boolean(message.approved);
-        if (clientWs.isAuthenticated && typeof clientWs.sendClientInit === 'function') {
-          try { clientWs.sendClientInit(); } catch (_) {}
+        if (clientWs.readyState === WebSocket.OPEN) {
+          clientWs.send(JSON.stringify(message));
+          if (clientWs.isAuthenticated && typeof clientWs.sendClientInit === 'function') {
+            try { clientWs.sendClientInit(); } catch (_) {}
+          }
         }
       }
     }
+    return;
+  }
+
+  if (message.type === 'device_revoked') {
+    for (const [clientWs, info] of connectedClients.entries()) {
+      if (clientWs.readyState !== WebSocket.OPEN) continue;
+      if (clientWs.isHost || (info && info.id === message.deviceId)) {
+        if (info && info.id === message.deviceId && !clientWs.isHost) {
+          clientWs.isAuthenticated = false;
+        }
+        clientWs.send(JSON.stringify(message));
+      }
+    }
+    return;
+  }
+
+  if (message.type === 'office_security_updated') {
+    const approvedList = Array.isArray(state.approvedDevices) ? state.approvedDevices : [];
+    const requireApproval = Boolean(state.officeSecurity?.requireApproval);
+
+    for (const clientWs of wss.clients) {
+      if (clientWs === excludeWs || clientWs.readyState !== WebSocket.OPEN) continue;
+      const info = connectedClients.get(clientWs);
+
+      if (isSecEnabled && !clientWs.isHost) {
+        const stillApproved = !requireApproval || (info && approvedList.includes(info.id));
+        if (!clientWs.hasPinAuth || !stillApproved) {
+          clientWs.isAuthenticated = false;
+        }
+      } else if (!isSecEnabled) {
+        clientWs.isAuthenticated = true;
+      }
+
+      if (clientWs.isHost || clientWs.isAuthenticated) {
+        clientWs.send(JSON.stringify(message));
+      } else {
+        // Never leak the plaintext Room PIN to unauthenticated or pending clients
+        clientWs.send(JSON.stringify({
+          type: 'office_security_updated',
+          officeSecurity: {
+            enabled: Boolean(message.officeSecurity?.enabled),
+            requireApproval: Boolean(message.officeSecurity?.requireApproval),
+          },
+        }));
+        if (isSecEnabled) {
+          clientWs.send(JSON.stringify({
+            type: 'auth_required',
+            officeSecurity: true,
+            requiresApproval: Boolean(state.officeSecurity?.requireApproval),
+            clientId: info?.id,
+          }));
+        }
+      }
+    }
+    return;
+  }
+
+  if (message.type === 'device_approval_requested') {
+    const data = JSON.stringify(message);
+    for (const clientWs of wss.clients) {
+      if (clientWs !== excludeWs && clientWs.readyState === WebSocket.OPEN && clientWs.isHost) {
+        clientWs.send(data);
+      }
+    }
+    return;
   }
 
   const data = JSON.stringify(message);
   wss.clients.forEach((client) => {
-    if (client !== excludeWs && client.readyState === WebSocket.OPEN) {
-      client.send(data);
+    if (client === excludeWs || client.readyState !== WebSocket.OPEN) return;
+    if (isSecEnabled && !client.isAuthenticated && !client.isHost) {
+      return;
     }
+    client.send(data);
   });
 }
 
-// Coalescing broadcast for file uploads (1 broadcast/sec during bulk transfers)
+// Coalescing broadcast for file uploads (filters targeted files per recipient)
 let pendingUploadFiles = [];
 let pendingUploadSender = '';
 let uploadBroadcastTimer = null;
@@ -358,23 +442,54 @@ function broadcastFilesUploaded(files, sender) {
       pendingUploadFiles = [];
       pendingUploadSender = '';
       uploadBroadcastTimer = null;
-      broadcast({
-        type: 'files_uploaded',
-        files: batch,
-        sender: batchSender,
-      });
+
+      const state = stateStore.getState();
+      const isSecEnabled = Boolean(state.officeSecurity?.enabled);
+
+      for (const clientWs of wss.clients) {
+        if (clientWs.readyState !== WebSocket.OPEN) continue;
+        if (isSecEnabled && !clientWs.isAuthenticated && !clientWs.isHost) continue;
+
+        const info = connectedClients.get(clientWs);
+        const visibleFiles = clientWs.isHost
+          ? batch
+          : batch.filter((file) => {
+              const targetInfo = stateStore.getTargetedFile
+                ? (stateStore.getTargetedFile(file.relativePath) || stateStore.getTargetedFile(file.name))
+                : null;
+              if (!targetInfo) return true;
+              if (targetInfo.expiresAt && Date.now() > targetInfo.expiresAt) return false;
+              if (targetInfo.maxDownloads && targetInfo.downloadCount >= targetInfo.maxDownloads) return false;
+              if (Array.isArray(targetInfo.recipientIds) && targetInfo.recipientIds.length > 0) {
+                return Boolean(info?.id && targetInfo.recipientIds.includes(info.id));
+              }
+              return true;
+            });
+
+        if (visibleFiles.length > 0) {
+          clientWs.send(JSON.stringify({
+            type: 'files_uploaded',
+            files: visibleFiles,
+            sender: batchSender,
+          }));
+        }
+      }
     }, 1000);
   }
 }
 
 function getUniqueDevices() {
   const deviceMap = new Map();
+  const state = stateStore.getState();
+  const isSecEnabled = Boolean(state.officeSecurity?.enabled);
+
   for (const [ws, info] of connectedClients.entries()) {
     if (ws.readyState === WebSocket.OPEN && info) {
+      if (isSecEnabled && !ws.isAuthenticated && !ws.isHost) continue;
       const ip = (info.ip || 'local').replace(/^.*:/, '').trim().toLowerCase();
       const osKey = (info.os || 'unknown').trim().toLowerCase();
       const nameKey = (info.name || '').trim().toLowerCase();
-      const key = `${ip}_${osKey}_${nameKey}`;
+      const key = info.id ? `id_${info.id}` : `${ip}_${osKey}_${nameKey}`;
 
       if (deviceMap.has(key)) {
         const existing = deviceMap.get(key);
@@ -397,12 +512,77 @@ function broadcastDevicesList() {
   });
 }
 
-// Enforce Session Validation on WebSocket Upgrade Requests
+function isRoomFullForDevice(deviceId, isHost) {
+  if (isHost) return { full: false };
+  const state = stateStore.getState();
+  const maxParticipants = Number(state.roomSettings?.maxParticipants) || 0;
+  if (maxParticipants <= 0) return { full: false };
+
+  const uniqueDevices = getUniqueDevices();
+  if (deviceId && uniqueDevices.some((d) => d.id === deviceId)) {
+    return { full: false };
+  }
+
+  if (uniqueDevices.length >= maxParticipants) {
+    return {
+      full: true,
+      maxParticipants,
+      currentCount: uniqueDevices.length,
+    };
+  }
+  return { full: false };
+}
+
+function kickDeviceById(deviceId) {
+  if (!deviceId) return;
+  for (const [clientWs, info] of connectedClients.entries()) {
+    if (info && info.id === deviceId) {
+      if (info.ip) unregisterActiveDeviceIp(info.id, info.ip);
+      connectedClients.delete(clientWs);
+      try {
+        if (clientWs.readyState === WebSocket.OPEN) {
+          clientWs.send(JSON.stringify({ type: 'device_kicked', deviceId, message: 'Removed from room by host' }));
+        }
+        clientWs.close(4004, 'Removed by host');
+      } catch (_) {}
+    }
+  }
+  broadcastDevicesList();
+}
+
+// Enforce Session Validation & Rate Limiting on WebSocket Upgrade Requests
 server.on('upgrade', (req, socket, head) => {
+  const remoteIp = getNormalizedRemoteAddress(req) || 'local';
+
+  // Connection exhaustion guard
+  if (wss.clients.size >= MAX_WS_CLIENTS) {
+    socket.write('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n');
+    socket.destroy();
+    return;
+  }
+  let ipCount = 0;
+  for (const info of connectedClients.values()) {
+    if (info && info.ip === remoteIp) ipCount++;
+  }
+  if (ipCount >= MAX_WS_PER_IP) {
+    socket.write('HTTP/1.1 429 Too Many Requests\r\nConnection: close\r\n\r\n');
+    socket.destroy();
+    return;
+  }
+
   const state = stateStore.getState();
   if (state.officeSecurity?.enabled) {
     const isHost = isHostRequest(req);
     let isAuthed = isHost;
+
+    if (!isHost) {
+      const lockout = getPinLockoutInfo(remoteIp);
+      if (lockout.locked) {
+        socket.write('HTTP/1.1 429 Too Many Requests\r\nConnection: close\r\n\r\n');
+        socket.destroy();
+        return;
+      }
+    }
 
     if (!isAuthed) {
       const sessionCookie = getCookie(req.headers.cookie, 'airbridge_session');
@@ -415,8 +595,13 @@ server.on('upgrade', (req, socket, head) => {
       try {
         const urlObj = new URL(req.url, 'http://localhost');
         const queryPin = urlObj.searchParams.get('pin');
-        if (queryPin && queryPin === state.officeSecurity.pin) {
-          isAuthed = true;
+        if (queryPin !== null && queryPin !== '') {
+          if (verifyPinTimingSafe(queryPin, state.officeSecurity.pin)) {
+            resetPinAttempts(remoteIp);
+            isAuthed = true;
+          } else {
+            recordFailedPinAttempt(remoteIp);
+          }
         }
       } catch (_) {}
     }
@@ -475,21 +660,38 @@ wss.on('connection', (ws, req) => {
 
   const clientId = queryId || ('dev_' + Math.random().toString(36).substring(2, 9));
   const clientName = queryName || defaultClientName;
-  const ip = req.socket.remoteAddress ? req.socket.remoteAddress.replace(/^.*:/, '') : 'local';
+  const ip = getNormalizedRemoteAddress(req) || 'local';
 
-  const isHostClient = (queryHostToken && queryHostToken === BOOT_HOST_SECRET) ||
-    isHostRequest(req);
+  const isHostClient = verifyPinTimingSafe(queryHostToken, BOOT_HOST_SECRET) || isHostRequest(req);
   const state = stateStore.getState();
-  let isAuthenticated = !state.officeSecurity?.enabled || isHostClient;
 
-  if (!isAuthenticated) {
+  // Room Member Limit Enforcement (Host is never locked out; existing peers reconnecting are allowed)
+  const capacityCheck = isRoomFullForDevice(clientId, isHostClient);
+  if (capacityCheck.full) {
+    try {
+      ws.send(JSON.stringify({
+        type: 'room_full',
+        maxParticipants: capacityCheck.maxParticipants,
+        currentCount: capacityCheck.currentCount,
+        message: `Room is full (${capacityCheck.currentCount}/${capacityCheck.maxParticipants} people joined)`,
+      }));
+    } catch (_) {}
+    ws.close(4003, 'Room is full');
+    return;
+  }
+  let hasPinAuth = isHostClient || !state.officeSecurity?.enabled;
+  let isAuthenticated = hasPinAuth;
+
+  if (!hasPinAuth) {
     const sessionCookie = getCookie(req.headers.cookie, 'airbridge_session');
     if (sessionCookie && verifySessionToken(sessionCookie)) {
+      hasPinAuth = true;
       isAuthenticated = true;
     }
   }
 
-  if (!isAuthenticated && queryPin && queryPin === state.officeSecurity?.pin) {
+  if (!hasPinAuth && queryPin && verifyPinTimingSafe(queryPin, state.officeSecurity?.pin)) {
+    hasPinAuth = true;
     isAuthenticated = true;
   }
 
@@ -514,19 +716,11 @@ wss.on('connection', (ws, req) => {
       }
     }
   }
+  ws.hasPinAuth = hasPinAuth;
   ws.isAuthenticated = isAuthenticated;
   ws.isHost = isHostClient;
 
-  for (const [oldWs, oldInfo] of connectedClients.entries()) {
-    if (oldWs !== ws) {
-      const matchId = (queryId && oldInfo.id === queryId) || (oldInfo.id === clientId);
-      const matchPhysical = (oldInfo.ip === ip && oldInfo.os === osType);
-      if (matchId || matchPhysical) {
-        connectedClients.delete(oldWs);
-        try { oldWs.terminate(); } catch (e) {}
-      }
-    }
-  }
+  registerActiveDeviceIp(clientId, ip);
 
   const initialDeviceInfo = {
     id: clientId,
@@ -557,9 +751,16 @@ wss.on('connection', (ws, req) => {
         isLinux,
       },
       isHost: ws.isHost,
+      roomSettings: s.roomSettings || {
+        roomName: 'AirBridge Room',
+        maxParticipants: 0,
+        allowUploads: true,
+        allowChat: true,
+        allowClipboard: true,
+      },
       officeSecurity: {
         enabled: Boolean(s.officeSecurity?.enabled),
-        pin: ws.isAuthenticated ? s.officeSecurity?.pin : undefined,
+        pin: (ws.isHost || ws.isAuthenticated) ? s.officeSecurity?.pin : undefined,
       },
     }));
   }
@@ -584,9 +785,24 @@ wss.on('connection', (ws, req) => {
       const s = stateStore.getState();
 
       if (msg.type === 'authenticate') {
+        if (!ws.isHost) {
+          const lockout = getPinLockoutInfo(ip);
+          if (lockout.locked) {
+            ws.send(JSON.stringify({
+              type: 'auth_failed',
+              locked: true,
+              error: `Too many PIN attempts. Please wait ${lockout.waitSeconds}s.`,
+            }));
+            return;
+          }
+        }
+
         const clientPin = (msg.pin || '').toString().trim();
         const msgDeviceId = msg.deviceId || queryId || clientId;
-        if (!s.officeSecurity?.enabled || clientPin === s.officeSecurity?.pin) {
+        if (!s.officeSecurity?.enabled || ws.isHost || verifyPinTimingSafe(clientPin, s.officeSecurity?.pin)) {
+          if (!ws.isHost) resetPinAttempts(ip);
+          ws.hasPinAuth = true;
+
           if (s.officeSecurity?.enabled && s.officeSecurity?.requireApproval && !ws.isHost) {
             const approvedList = Array.isArray(s.approvedDevices) ? s.approvedDevices : [];
             if (!approvedList.includes(msgDeviceId)) {
@@ -603,6 +819,7 @@ wss.on('connection', (ws, req) => {
           sendClientInit(ws);
           broadcastDevicesList();
         } else {
+          if (!ws.isHost) recordFailedPinAttempt(ip);
           ws.send(JSON.stringify({ type: 'auth_failed', error: 'Invalid PIN' }));
         }
         return;
@@ -616,7 +833,12 @@ wss.on('connection', (ws, req) => {
       switch (msg.type) {
         case 'identify': {
           const current = connectedClients.get(ws) || {};
-          const persistentId = msg.payload?.id || current.id || clientId;
+          const requestedId = msg.payload?.id ? String(msg.payload.id).trim() : null;
+          const persistentId = requestedId || current.id || clientId;
+          if (current.id && persistentId !== current.id) {
+            unregisterActiveDeviceIp(current.id, ip);
+            registerActiveDeviceIp(persistentId, ip);
+          }
 
           let clientBattery = msg.payload?.battery;
           if (!clientBattery && ws.isHost) {
@@ -648,6 +870,10 @@ wss.on('connection', (ws, req) => {
         }
 
         case 'clipboard_sync': {
+          if (!ws.isHost && s.roomSettings && s.roomSettings.allowClipboard === false) {
+            ws.send(JSON.stringify({ type: 'toast', message: 'Clipboard sync is disabled by the room host' }));
+            break;
+          }
           const text = msg.payload.text || '';
           const clipItem = {
             id: msg.payload.id || ('clip_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6)),
@@ -697,6 +923,10 @@ wss.on('connection', (ws, req) => {
         }
 
         case 'send_message': {
+          if (!ws.isHost && s.roomSettings && s.roomSettings.allowChat === false) {
+            ws.send(JSON.stringify({ type: 'toast', message: 'Peer chat is disabled by the room host' }));
+            break;
+          }
           const chatMsg = {
             id: msg.payload.id || ('msg_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6)),
             text: msg.payload.text,
@@ -741,6 +971,10 @@ wss.on('connection', (ws, req) => {
   });
 
   ws.on('close', () => {
+    const info = connectedClients.get(ws);
+    if (info && info.id) {
+      unregisterActiveDeviceIp(info.id, info.ip || ip);
+    }
     connectedClients.delete(ws);
     broadcastDevicesList();
   });
@@ -748,8 +982,11 @@ wss.on('connection', (ws, req) => {
 
 // Periodic heartbeat
 const heartbeatInterval = setInterval(() => {
-  for (const clientWs of connectedClients.keys()) {
+  for (const [clientWs, info] of connectedClients.entries()) {
     if (clientWs.isAlive === false || clientWs.readyState !== WebSocket.OPEN) {
+      if (info && info.id) {
+        unregisterActiveDeviceIp(info.id, info.ip);
+      }
       connectedClients.delete(clientWs);
       try { clientWs.terminate(); } catch (e) {}
       continue;
@@ -787,6 +1024,8 @@ app.use('/api', createInfoRouter({
 app.use('/api/office', createOfficeRouter({
   stateStore,
   broadcast,
+  isRoomFullForDevice,
+  kickDeviceById,
 }));
 
 app.use('/api/chat', requireOfficeAuth, createChatRouter({
@@ -948,6 +1187,7 @@ if (require.main === module) {
 module.exports = {
   app,
   server,
+  broadcast,
   stateStore,
   BOOT_HOST_SECRET,
   UPLOADS_DIR,

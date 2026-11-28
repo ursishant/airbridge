@@ -27,12 +27,10 @@ export const FolderBeamModal: React.FC<FolderBeamModalProps> = ({
   onConfirm,
   onClose,
 }) => {
-  // Total byte size across all files
   const totalBytes = React.useMemo(() => {
     return files.reduce((acc, curr) => acc + (curr.file?.size || 0), 0);
   }, [files]);
 
-  // Keyboard accessibility (Escape to dismiss, Enter to proceed)
   useEffect(() => {
     if (!isOpen) return;
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -52,101 +50,97 @@ export const FolderBeamModal: React.FC<FolderBeamModalProps> = ({
     <AnimatePresence>
       {isOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6 overflow-x-hidden overflow-y-auto">
-          {/* Frosted Glass Backdrop */}
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            transition={{ duration: 0.2 }}
+            transition={{ duration: 0.16 }}
             onClick={onClose}
-            className="fixed inset-0 bg-black/60 backdrop-blur-xl"
+            className="ab-modal-backdrop"
           />
 
-          {/* Modal Container */}
           <motion.div
-            initial={{ opacity: 0, scale: 0.94, y: 12 }}
+            initial={{ opacity: 0, scale: 0.96, y: 8 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
-            exit={{ opacity: 0, scale: 0.94, y: 12 }}
-            transition={{ type: 'spring', stiffness: 420, damping: 30 }}
-            className="relative z-10 w-full max-w-lg bg-white dark:bg-[#141926] border border-black/[0.08] dark:border-white/[0.1] rounded-[32px] p-6 sm:p-7 shadow-2xl text-[#0F1115] dark:text-[#F3F4F6] overflow-hidden"
+            exit={{ opacity: 0, scale: 0.96, y: 8 }}
+            transition={{ type: 'spring', stiffness: 460, damping: 34 }}
+            className="ab-modal max-w-md p-6 overflow-hidden"
           >
-            {/* Top Close Button */}
             <button
               onClick={onClose}
-              className="apple-press absolute top-5 right-5 p-2 rounded-full text-[#64748B] hover:text-[#0F1115] dark:text-[#94A3B8] dark:hover:text-white bg-black/[0.04] dark:bg-white/[0.06] hover:bg-black/[0.08] dark:hover:bg-white/[0.1] transition-colors"
+              className="apple-press absolute top-4 right-4 w-8 h-8 rounded-full flex items-center justify-center transition-colors"
+              style={{ background: 'var(--surface-alt)', color: 'var(--text-secondary)' }}
               aria-label="Close dialog"
             >
               <X className="w-4 h-4" />
             </button>
 
-            {/* Header */}
-            <div className="flex items-start gap-4">
-              <div className="w-13 h-13 rounded-2xl bg-[#0071E3]/10 dark:bg-[#C6F432]/15 text-[#0071E3] dark:text-[#C6F432] flex items-center justify-center shrink-0 shadow-inner">
-                <M3AirDropIcon className="w-7 h-7 text-inherit" filled />
+            <div className="flex items-start gap-3.5">
+              <div
+                className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0"
+                style={{ background: 'var(--accent-soft)', color: 'var(--accent)' }}
+              >
+                <M3AirDropIcon className="w-5 h-5" filled />
               </div>
 
               <div className="min-w-0 pr-6">
-                <span className="text-[10px] font-mono font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-[#0071E3]/10 dark:bg-[#C6F432]/15 text-[#0071E3] dark:text-[#C6F432]">
-                  AirBridge Transfer Confirmation
-                </span>
-                <h3 className="font-display font-bold text-lg sm:text-xl text-[#0F1115] dark:text-white tracking-tight mt-1.5 leading-snug">
-                  Upload {files.length.toLocaleString()} files to this site?
+                <span className="ab-kicker block">Folder Transfer</span>
+                <h3 className="font-display text-base sm:text-lg font-bold mt-1 leading-snug" style={{ color: 'var(--text-primary)' }}>
+                  Send {files.length.toLocaleString()} files?
                 </h3>
-                <p className="text-xs text-[#64748B] dark:text-[#94A3B8] mt-1 leading-relaxed">
-                  This will upload all files from <span className="font-semibold text-[#0F1115] dark:text-white">&apos;{folderName}&apos;</span> to your AirBridge shared storage.
+                <p className="text-xs mt-1 leading-relaxed" style={{ color: 'var(--text-secondary)' }}>
+                  Transfers <span className="font-semibold" style={{ color: 'var(--text-primary)' }}>&lsquo;{folderName}&rsquo;</span> with folder structure preserved.
                 </p>
               </div>
             </div>
 
-            {/* Folder Details Bento */}
             <div className="mt-5 space-y-2.5">
-              {/* Folder Summary Card */}
-              <div className="p-3.5 rounded-2xl bg-[#F8FAFC] dark:bg-[#181E2E] border border-black/[0.05] dark:border-white/[0.06] flex items-center justify-between gap-3">
+              <div
+                className="p-3.5 rounded-xl flex items-center justify-between gap-3"
+                style={{ background: 'var(--surface-alt)', border: '1px solid var(--border)' }}
+              >
                 <div className="flex items-center gap-3 min-w-0">
-                  <div className="w-9 h-9 rounded-xl bg-[#F59E0B]/10 text-[#F59E0B] flex items-center justify-center shrink-0">
-                    <M3FolderIcon className="w-5 h-5 text-inherit" />
+                  <div
+                    className="w-9 h-9 rounded-lg flex items-center justify-center shrink-0"
+                    style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}
+                  >
+                    <M3FolderIcon className="w-4 h-4 text-amber-500" />
                   </div>
                   <div className="min-w-0">
-                    <p className="font-display text-xs sm:text-sm font-bold text-[#0F1115] dark:text-white truncate">
+                    <p className="font-display text-xs sm:text-sm font-bold truncate" style={{ color: 'var(--text-primary)' }}>
                       {folderName}
                     </p>
-                    <p className="text-[11px] text-[#64748B] dark:text-[#94A3B8] font-mono">
-                      Full directory hierarchy preserved
+                    <p className="text-[11px] font-mono" style={{ color: 'var(--text-tertiary)' }}>
+                      Tree preserved
                     </p>
                   </div>
                 </div>
                 <div className="text-right shrink-0">
-                  <p className="font-mono text-xs font-bold text-[#0F1115] dark:text-white">
+                  <p className="font-mono text-xs font-semibold tabular-nums" style={{ color: 'var(--text-primary)' }}>
                     {files.length.toLocaleString()} files
                   </p>
-                  <p className="font-mono text-[10px] text-[#64748B] dark:text-[#94A3B8]">
+                  <p className="font-mono text-[11px] tabular-nums" style={{ color: 'var(--text-tertiary)' }}>
                     {formatBytes(totalBytes)}
                   </p>
                 </div>
               </div>
 
-              {/* Security & Link Card */}
-              <div className="p-3 rounded-2xl bg-[#10B981]/[0.06] dark:bg-[#C6F432]/[0.06] border border-[#10B981]/20 dark:border-[#C6F432]/20 flex items-center gap-3">
-                <div className="w-7 h-7 rounded-lg bg-[#10B981]/15 dark:bg-[#C6F432]/15 text-[#10B981] dark:text-[#C6F432] flex items-center justify-center shrink-0">
-                  <ShieldCheck className="w-4 h-4 text-inherit" />
-                </div>
-                <div className="min-w-0 text-xs">
-                  <p className="font-bold text-[#0F1115] dark:text-white">
-                    Direct Gigabit LAN Transfer
-                  </p>
-                  <p className="text-[11px] text-[#64748B] dark:text-[#94A3B8] font-mono">
-                    Zero cloud hops • Stored in ~/Downloads/AirBridge
-                  </p>
-                </div>
+              <div
+                className="p-3 rounded-xl flex items-center gap-2.5 text-xs"
+                style={{ background: 'var(--surface-alt)', border: '1px solid var(--border)' }}
+              >
+                <ShieldCheck className="w-4 h-4 shrink-0" style={{ color: 'var(--success)' }} />
+                <span style={{ color: 'var(--text-secondary)' }}>
+                  Direct LAN transfer · stored in <span className="font-mono">~/Downloads/AirBridge</span>
+                </span>
               </div>
             </div>
 
-            {/* Action Buttons */}
-            <div className="mt-6 flex flex-col sm:flex-row items-center justify-end gap-3">
+            <div className="mt-6 flex flex-col-reverse sm:flex-row items-center justify-end gap-2">
               <button
                 type="button"
                 onClick={onClose}
-                className="apple-press w-full sm:w-auto px-5 py-3 rounded-2xl text-xs font-bold text-[#64748B] hover:text-[#0F1115] dark:text-[#94A3B8] dark:hover:text-white bg-black/[0.04] dark:bg-white/[0.06] hover:bg-black/[0.08] dark:hover:bg-white/[0.1] transition-colors"
+                className="ab-btn ab-btn-ghost w-full sm:w-auto px-4 text-xs"
               >
                 Cancel
               </button>
@@ -154,10 +148,10 @@ export const FolderBeamModal: React.FC<FolderBeamModalProps> = ({
               <button
                 type="button"
                 onClick={() => onConfirm(files)}
-                className="apple-press flex-1 w-full flex items-center justify-center gap-2 py-3 px-6 rounded-2xl text-xs font-bold bg-[#0F1115] hover:bg-black text-white dark:bg-[#C6F432] dark:hover:bg-[#B5E22B] dark:text-[#0A0D14] shadow-md transition-all"
+                className="ab-btn ab-btn-primary w-full sm:flex-1 px-5 text-xs"
               >
-                <M3AirDropIcon className="w-4 h-4 text-inherit" filled />
-                <span>Upload ({files.length.toLocaleString()} files • {formatBytes(totalBytes)})</span>
+                <M3AirDropIcon className="w-4 h-4" filled />
+                <span>Send ({formatBytes(totalBytes)})</span>
               </button>
             </div>
           </motion.div>

@@ -1,22 +1,15 @@
 import React, { useState, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { QRCodeSVG } from 'qrcode.react';
-import { Sparkles, FolderUp, Users } from 'lucide-react';
+import { FolderUp, Upload } from 'lucide-react';
 import type { ConnectedDevice, ServerInfo } from '../hooks/useWebSocket';
-import { 
-  M3MacBookIcon, 
-  M3PhoneIcon, 
-  M3WindowsPcIcon,
-  M3IosPhoneIcon,
-  M3LinuxIcon,
-  M3PhotosIcon, 
-  M3FolderIcon, 
-  M3CameraIcon, 
-  M3AirDropIcon, 
-  M3QrCodeIcon,
-  M3ShieldLockIcon,
-  M3BatteryPill
+import type { UploadProgressInfo } from '../utils/chunkedUpload';
+import {
+  M3PhotosIcon,
+  M3CameraIcon,
+  M3AirDropIcon,
+  M3BatteryPill,
 } from './M3Icons';
+import { DeviceOsIcon } from './DeviceOsIcon';
 import { scanDataTransferItems, extractFilesFromList, pickAndTraverseDirectory, type TraversedFile } from '../utils/folderUpload';
 
 interface AirDropRadarProps {
@@ -29,35 +22,38 @@ interface AirDropRadarProps {
   deviceName: string;
   isUploading?: boolean;
   uploadProgress?: number;
+  uploadProgressInfo?: UploadProgressInfo | null;
+  selectedTargetIds?: string[];
+  onToggleTargetDevice?: (deviceId: string) => void;
+  onClearTargetDevices?: () => void;
   officeSecurityEnabled?: boolean;
   officePin?: string;
   onOpenSecuritySettings?: () => void;
   onOpenQR: () => void;
   onRingDevice: (target: 'android' | 'mac') => void;
-  onDropFiles: (files: TraversedFile[] | FileList | File[], isFromInput?: boolean) => void;
+  onDropFiles: (files: TraversedFile[] | FileList | File[], isFromInput?: boolean, explicitTargetIds?: string[]) => void;
   onOpenCameraSnap?: () => void;
+  compactStage?: boolean;
+  uploadsDisabled?: boolean;
 }
 
 export const AirDropRadar: React.FC<AirDropRadarProps> = ({
   devices,
   myDeviceId,
-  serverInfo,
-  isMac,
-  isAndroid,
-  isWindows = false,
-  deviceName,
   isUploading = false,
   uploadProgress = 0,
-  officeSecurityEnabled = false,
-  officePin = '',
-  onOpenSecuritySettings,
-  onOpenQR: _onOpenQR,
+  uploadProgressInfo = null,
+  selectedTargetIds = [],
+  onToggleTargetDevice,
+  onClearTargetDevices,
   onRingDevice,
   onDropFiles,
   onOpenCameraSnap,
+  compactStage = false,
+  uploadsDisabled = false,
 }) => {
   const [isDraggingStage, setIsDraggingStage] = useState(false);
-  const [showInlineQr, setShowInlineQr] = useState(false);
+  const [hoveredTargetPeerId, setHoveredTargetPeerId] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const folderInputRef = useRef<HTMLInputElement | null>(null);
@@ -65,35 +61,29 @@ export const AirDropRadar: React.FC<AirDropRadarProps> = ({
   const cameraInputRef = useRef<HTMLInputElement | null>(null);
 
   const otherDevices = devices.filter((d) => d.id !== myDeviceId);
-  const myDevice = devices.find((d) => d.id === myDeviceId) || {
-    id: 'local',
-    name: deviceName || (isWindows ? 'Windows PC' : isMac ? 'MacBook' : 'Android'),
-    os: (isWindows ? 'Windows' : isMac ? 'macOS' : isAndroid ? 'Android' : 'Browser') as ConnectedDevice['os'],
-    ip: '127.0.0.1',
-    connectedAt: Date.now(),
-  };
-
-  let rawPairingUrl = serverInfo 
-    ? `http://${serverInfo.primaryIp}:${serverInfo.port}` 
-    : (typeof window !== 'undefined' ? window.location.origin : '');
-
-  const pairingUrl = officeSecurityEnabled && officePin 
-    ? `${rawPairingUrl}/?pin=${encodeURIComponent(officePin)}`
-    : rawPairingUrl;
-
-  const renderDeviceIcon = (os: string, className = "w-6 h-7") => {
-    if (os === 'Windows') return <M3WindowsPcIcon className={className} active={true} />;
-    if (os === 'macOS') return <M3MacBookIcon className={className} active={true} />;
-    if (os === 'iOS') return <M3IosPhoneIcon className={className} active={true} />;
-    if (os === 'Linux') return <M3LinuxIcon className={className} />;
-    return <M3PhoneIcon className={className} active={true} />;
-  };
 
   const handleDeviceClick = (device: ConnectedDevice) => {
     if (device.os === 'Android' || device.os === 'iOS') {
       onRingDevice('android');
     } else {
       onRingDevice('mac');
+    }
+  };
+
+  const handlePeerDrop = async (e: React.DragEvent, targetDeviceId: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDraggingStage(false);
+    setHoveredTargetPeerId(null);
+    if (e.dataTransfer) {
+      const scanned = await scanDataTransferItems(e.dataTransfer.items);
+      if (scanned.length > 0) {
+        onDropFiles(scanned, false, [targetDeviceId]);
+        return;
+      }
+      if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+        onDropFiles(extractFilesFromList(e.dataTransfer.files), false, [targetDeviceId]);
+      }
     }
   };
 
@@ -125,8 +115,6 @@ export const AirDropRadar: React.FC<AirDropRadarProps> = ({
   };
 
   const handlePickFolder = async () => {
-    // 1. Modern native File System Access API (Desktop Chrome / Edge / Opera)
-    // Directly opens the native OS folder picker with "Select Folder" / "Upload"
     const scanned = await pickAndTraverseDirectory();
     if (scanned !== null) {
       if (scanned.length > 0) {
@@ -135,7 +123,6 @@ export const AirDropRadar: React.FC<AirDropRadarProps> = ({
       return;
     }
 
-    // 2. Fallback to standard input element with explicit DOM properties for Safari / Firefox
     if (folderInputRef.current) {
       folderInputRef.current.value = '';
       (folderInputRef.current as any).webkitdirectory = true;
@@ -149,13 +136,7 @@ export const AirDropRadar: React.FC<AirDropRadarProps> = ({
   return (
     <div className="w-full">
       {/* Hidden File Inputs */}
-      <input
-        ref={fileInputRef}
-        type="file"
-        multiple
-        className="hidden"
-        onChange={handleFileInputChange}
-      />
+      <input ref={fileInputRef} type="file" multiple className="hidden" onChange={handleFileInputChange} />
       <input
         ref={(el) => {
           folderInputRef.current = el;
@@ -171,321 +152,181 @@ export const AirDropRadar: React.FC<AirDropRadarProps> = ({
         className="hidden"
         onChange={handleFolderInputChange}
       />
-      <input
-        ref={mediaInputRef}
-        type="file"
-        multiple
-        accept="image/*,video/*"
-        className="hidden"
-        onChange={handleFileInputChange}
-      />
-      <input
-        ref={cameraInputRef}
-        type="file"
-        accept="image/*"
-        capture="environment"
-        className="hidden"
-        onChange={handleFileInputChange}
-      />
+      <input ref={mediaInputRef} type="file" multiple accept="image/*,video/*" className="hidden" onChange={handleFileInputChange} />
+      <input ref={cameraInputRef} type="file" accept="image/*" capture="environment" className="hidden" onChange={handleFileInputChange} />
 
-      {/* Hero Transmission Stage */}
-      <div 
-        onDragOver={(e) => {
-          e.preventDefault();
-          setIsDraggingStage(true);
-        }}
+      {/* Center Stage Drop Zone */}
+      <div
+        onDragOver={(e) => { e.preventDefault(); setIsDraggingStage(true); }}
         onDragLeave={() => setIsDraggingStage(false)}
         onDrop={handleStageDrop}
-        className={`relative bento-card rounded-[32px] p-5 sm:p-8 transition-all duration-300 overflow-hidden ${
-          isDraggingStage 
-            ? 'ring-4 ring-[#0071E3]/20 dark:ring-[#C6F432]/30 scale-[1.008] border-[#0071E3] dark:border-[#C6F432]' 
-            : ''
+        className={`relative rounded-2xl transition-colors duration-150 ${
+          isDraggingStage ? 'ring-2 ring-blue-500/40 bg-blue-50 dark:bg-blue-500/[0.06]' : ''
         }`}
+        style={{ border: `1.5px dashed ${isDraggingStage ? 'var(--accent)' : 'var(--border)'}` }}
       >
-        {/* Ambient Top Glow */}
-        <div className="absolute inset-0 bg-gradient-to-b from-[#0071E3]/[0.03] via-transparent to-transparent dark:from-[#C6F432]/[0.02] pointer-events-none" />
-
-        <div className="relative z-10 space-y-6">
-          {/* Row 1: Dual-Node Connection Conduit Stage */}
-          <div className="flex flex-col sm:flex-row items-center justify-between gap-4 sm:gap-6">
-            {/* Host Node */}
-            <div className="flex items-center gap-3.5 w-full sm:w-auto">
-              <div className="w-13 h-13 rounded-2xl bg-[#F8FAFC] dark:bg-[#1A2030] border border-black/[0.08] dark:border-white/[0.1] shadow-sm flex items-center justify-center shrink-0">
-                {renderDeviceIcon(myDevice.os, "w-7 h-7 text-[#0071E3] dark:text-white")}
-              </div>
-              <div className="min-w-0">
-                <div className="flex items-center gap-2">
-                  <h4 className="font-display text-sm sm:text-base font-bold text-[#0F1115] dark:text-[#F3F4F6] truncate tracking-tight">
-                    {myDevice.name}
-                  </h4>
-                  <span className="text-[10px] font-mono font-bold uppercase px-2 py-0.5 rounded-full bg-black/[0.04] dark:bg-white/[0.08] text-[#0071E3] dark:text-[#C6F432]">
-                    Host
+        {/* Upload Progress Overlay */}
+        <AnimatePresence>
+          {isUploading && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="absolute inset-0 z-10 rounded-2xl flex flex-col items-center justify-center gap-3"
+              style={{ background: 'var(--surface)' }}
+            >
+              <div className="relative w-16 h-16">
+                <svg className="w-16 h-16 -rotate-90">
+                  <circle cx="32" cy="32" r="28" stroke="var(--border)" strokeWidth="3" fill="none" />
+                  <circle
+                    cx="32"
+                    cy="32"
+                    r="28"
+                    stroke="var(--accent)"
+                    strokeWidth="3"
+                    fill="none"
+                    strokeDasharray={175.9}
+                    strokeDashoffset={175.9 - (175.9 * uploadProgress) / 100}
+                    strokeLinecap="round"
+                    className="transition-[stroke-dashoffset] duration-200"
+                  />
+                </svg>
+                <div className="absolute inset-0 flex items-center justify-center">
+                  <span className="text-sm font-bold font-mono" style={{ color: 'var(--accent)' }}>
+                    {uploadProgress}%
                   </span>
                 </div>
-                <p className="text-xs text-[#64748B] dark:text-[#94A3B8] font-mono truncate mt-0.5">
-                  Local Host • {myDevice.os}
+              </div>
+              <div className="text-center px-6">
+                <p className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>
+                  {uploadProgressInfo?.currentFileName ? `Sending ${uploadProgressInfo.currentFileName}` : 'Sending...'}
                 </p>
+                <div className="flex items-center justify-center gap-3 mt-1 text-xs font-mono" style={{ color: 'var(--text-tertiary)' }}>
+                  {uploadProgressInfo?.totalFiles && uploadProgressInfo.totalFiles > 1 && (
+                    <span>{uploadProgressInfo.fileIndex}/{uploadProgressInfo.totalFiles} files</span>
+                  )}
+                  {uploadProgressInfo?.speedMBs !== undefined && uploadProgressInfo.speedMBs > 0 && (
+                    <span style={{ color: 'var(--success)' }}>{uploadProgressInfo.speedMBs} MB/s</span>
+                  )}
+                </div>
               </div>
-            </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
 
-            {/* Center Animated Conduit */}
-            <div className="flex flex-col items-center justify-center gap-2 shrink-0 py-1 sm:py-0">
-              <div className="flex items-center gap-1.5 px-3.5 py-1 rounded-full bg-black/[0.03] dark:bg-white/[0.06] border border-black/[0.04] dark:border-white/[0.08]">
-                <span className="relative flex h-2 w-2">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#10B981] opacity-75" />
-                  <span className="relative inline-flex rounded-full h-2 w-2 bg-[#10B981]" />
-                </span>
-                <span className="font-mono text-[10px] font-bold text-[#0F1115] dark:text-[#F3F4F6] tracking-wider">
-                  {otherDevices.length > 0 ? `OFFICE MESH • ${otherDevices.length} PEER${otherDevices.length > 1 ? 'S' : ''} ACTIVE` : 'DIRECT LAN READY'}
-                </span>
-              </div>
+        <div className={`flex flex-col items-center justify-center px-4 sm:px-6 ${compactStage ? 'py-7 sm:py-10' : 'py-10 sm:py-16'}`}>
+          <div
+            className="w-14 h-14 sm:w-16 sm:h-16 rounded-2xl flex items-center justify-center mb-4 sm:mb-5"
+            style={{ background: 'var(--surface-alt)', border: '1px solid var(--border)' }}
+          >
+            <M3AirDropIcon className="w-6 h-6 sm:w-7 sm:h-7" filled style={{ color: 'var(--accent)' }} />
+          </div>
 
-              <div className="flex items-center gap-1.5 opacity-80">
-                <span className="w-1.5 h-1.5 rounded-full bg-[#0071E3] animate-pulse" />
-                <span className="w-16 sm:w-28 h-1 bg-gradient-to-r from-[#0071E3] via-[#10B981] to-[#C6F432] rounded-full" />
-                <span className="w-1.5 h-1.5 rounded-full bg-[#C6F432] animate-pulse" />
-              </div>
+          <h2 className="font-display text-lg sm:text-xl font-bold tracking-tight text-center" style={{ color: 'var(--text-primary)' }}>
+            {uploadsDisabled ? 'Uploads paused by host' : isDraggingStage ? 'Drop to send' : 'Drop files here'}
+          </h2>
+          <p className="text-xs sm:text-sm mt-1.5 text-center max-w-md" style={{ color: 'var(--text-tertiary)' }}>
+            {uploadsDisabled
+              ? 'You can still browse and download shared files below'
+              : 'or use the buttons below — direct LAN transfer up to 10 GB'}
+          </p>
 
-              {/* Office Wi-Fi Security Pill */}
+          {!uploadsDisabled && (
+            <div className="grid grid-cols-2 sm:flex sm:flex-wrap sm:justify-center gap-2 mt-5 sm:mt-6 w-full max-w-xs sm:max-w-none sm:w-auto">
+              <button type="button" onClick={() => fileInputRef.current?.click()} className="ab-btn ab-btn-primary text-xs h-9 px-4">
+                <Upload className="w-3.5 h-3.5 shrink-0" />
+                <span>Files</span>
+              </button>
+              <button type="button" onClick={handlePickFolder} className="ab-btn ab-btn-ghost text-xs h-9 px-4" title="Send folder">
+                <FolderUp className="w-3.5 h-3.5 shrink-0" style={{ color: '#D97706' }} />
+                <span>Folder</span>
+              </button>
+              <button type="button" onClick={() => mediaInputRef.current?.click()} className="ab-btn ab-btn-ghost text-xs h-9 px-4">
+                <M3PhotosIcon className="w-3.5 h-3.5 shrink-0" style={{ color: 'var(--success)' }} />
+                <span>Photos</span>
+              </button>
               <button
-                onClick={() => onOpenSecuritySettings?.()}
-                className={`apple-press flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-mono font-bold transition-all ${
-                  officeSecurityEnabled
-                    ? 'bg-[#10B981]/15 text-[#10B981] border border-[#10B981]/30 hover:bg-[#10B981]/25'
-                    : 'bg-black/[0.04] dark:bg-white/[0.06] text-[#64748B] dark:text-[#94A3B8] border border-black/[0.06] dark:border-white/[0.08] hover:text-[#0F1115] dark:hover:text-white'
-                }`}
-                title="Click to configure Office Room Protection"
+                type="button"
+                onClick={() => {
+                  onOpenCameraSnap ? onOpenCameraSnap() : cameraInputRef.current?.click();
+                }}
+                className="ab-btn ab-btn-ghost text-xs h-9 px-4"
               >
-                <M3ShieldLockIcon className="w-3 h-3" filled={officeSecurityEnabled} />
-                <span>{officeSecurityEnabled ? `PIN: ${officePin || 'ACTIVE'}` : 'OFFICE SHIELD'}</span>
+                <M3CameraIcon className="w-3.5 h-3.5 shrink-0" style={{ color: 'var(--accent)' }} />
+                <span>Camera</span>
               </button>
             </div>
-
-            {/* Remote Peer Node */}
-            <div className="flex items-center gap-3 w-full sm:w-auto justify-end">
-              {otherDevices.length > 0 ? (
-                <>
-                  <div className="text-right min-w-0">
-                    <div className="flex items-center justify-end gap-1.5">
-                      <h4 className="font-display text-sm sm:text-base font-bold text-[#0F1115] dark:text-[#F3F4F6] truncate tracking-tight">
-                        {otherDevices.length === 1 ? otherDevices[0].name : `${otherDevices.length} Office Devices`}
-                      </h4>
-                      <span className="text-[10px] font-mono font-bold uppercase px-2 py-0.5 rounded-full bg-[#10B981]/15 text-[#10B981]">
-                        {otherDevices.length === 1 ? otherDevices[0].os : 'Office Mesh'}
-                      </span>
-                    </div>
-                    <p className="text-xs text-[#64748B] dark:text-[#94A3B8] font-mono truncate mt-0.5">
-                      {otherDevices.length === 1 ? `${otherDevices[0].os} • P2P Active` : 'Windows, Mac, Phone'}
-                    </p>
-                  </div>
-                  <button
-                    onClick={() => handleDeviceClick(otherDevices[0])}
-                    className="apple-press w-13 h-13 rounded-2xl bg-[#F8FAFC] dark:bg-[#1A2030] border border-black/[0.08] dark:border-white/[0.1] shadow-sm flex items-center justify-center shrink-0 cursor-pointer"
-                    title={`Click to ping ${otherDevices[0].name}`}
-                  >
-                    {renderDeviceIcon(otherDevices[0].os, "w-6 h-7 text-[#10B981]")}
-                  </button>
-                </>
-              ) : (
-                <button
-                  onClick={() => {
-                    setShowInlineQr(!showInlineQr);
-                  }}
-                  className="apple-press flex items-center gap-3 px-4 py-2.5 rounded-2xl bg-[#F8FAFC] dark:bg-[#1A2030] border border-dashed border-[#0071E3]/30 dark:border-white/20 hover:border-[#0071E3] transition-colors"
-                >
-                  <div className="w-8 h-8 rounded-xl bg-[#0071E3]/10 dark:bg-white/10 text-[#0071E3] dark:text-[#38BDF8] flex items-center justify-center shrink-0">
-                    <M3QrCodeIcon className="w-4 h-4 text-[#0071E3] dark:text-[#C6F432]" />
-                  </div>
-                  <div className="text-left">
-                    <p className="font-display text-xs font-bold text-[#0F1115] dark:text-[#F3F4F6]">Pair Device</p>
-                    <p className="text-[10px] text-[#0071E3] dark:text-[#C6F432] font-mono font-semibold">Scan QR code →</p>
-                  </div>
-                </button>
-              )}
-            </div>
-          </div>
-
-          {/* Connected Office Peer Roster (when multiple office devices connected) */}
-          {otherDevices.length > 1 && (
-            <div className="pt-2 pb-1 border-t border-black/[0.06] dark:border-white/[0.06]">
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-[10px] font-bold font-mono uppercase tracking-wider text-[#64748B] dark:text-[#94A3B8] flex items-center gap-1.5">
-                  <Users className="w-3 h-3 text-[#0071E3] dark:text-[#C6F432]" />
-                  Connected Office Devices ({otherDevices.length})
-                </span>
-                <span className="text-[10px] text-[#10B981] font-mono font-bold">1 Gbps Direct LAN</span>
-              </div>
-              <div className="flex items-center gap-2 overflow-x-auto pb-1 scrollbar-none">
-                {otherDevices.map((dev) => (
-                  <div
-                    key={dev.id}
-                    onClick={() => handleDeviceClick(dev)}
-                    className="apple-press flex items-center gap-2 px-3 py-1.5 rounded-xl bg-black/[0.03] dark:bg-white/[0.05] border border-black/[0.06] dark:border-white/[0.06] hover:border-[#0071E3] transition-colors shrink-0 cursor-pointer"
-                    title={`Click to ping ${dev.name}`}
-                  >
-                    <div className="shrink-0">
-                      {renderDeviceIcon(dev.os, "w-4 h-4 text-[#0071E3] dark:text-[#C6F432]")}
-                    </div>
-                    <div className="min-w-0">
-                      <p className="text-xs font-bold text-[#0F1115] dark:text-white truncate max-w-[120px]">
-                        {dev.name}
-                      </p>
-                      <p className="text-[10px] font-mono text-[#64748B] dark:text-[#94A3B8]">
-                        {dev.os} • Direct LAN
-                      </p>
-                    </div>
-                    {dev.battery && (
-                      <M3BatteryPill level={dev.battery.level} charging={dev.battery.charging} className="ml-1" />
-                    )}
-                  </div>
-                ))}
-              </div>
-            </div>
           )}
-
-          {/* Inline QR Dropdown if opened */}
-          <AnimatePresence>
-            {showInlineQr && (
-              <motion.div
-                initial={{ height: 0, opacity: 0 }}
-                animate={{ height: 'auto', opacity: 1 }}
-                exit={{ height: 0, opacity: 0 }}
-                transition={{ duration: 0.2 }}
-                className="overflow-hidden rounded-2xl bg-[#F8FAFC] dark:bg-[#151720] border border-black/[0.06] dark:border-white/[0.08] p-5 text-center"
-              >
-                <p className="text-xs font-bold text-[#0F1115] dark:text-[#F3F4F6] mb-3 font-display">
-                  Point Android Camera at this QR Code
-                </p>
-                <div className="inline-block p-3 bg-white rounded-2xl shadow-sm border border-black/[0.06]">
-                  <QRCodeSVG value={pairingUrl} size={140} level="M" />
-                </div>
-                <p className="text-xs text-[#64748B] dark:text-[#94A3B8] font-mono mt-3 select-all">
-                  {pairingUrl}
-                </p>
-              </motion.div>
-            )}
-          </AnimatePresence>
-
-          {/* Row 2: Seamless Magnetic Drag & Drop Capsule */}
-          <div
-            className={`w-full py-8 px-6 rounded-2xl border-2 border-dashed text-center transition-all ${
-              isDraggingStage
-                ? 'border-[#0071E3] dark:border-[#C6F432] bg-[#0071E3]/[0.05] dark:bg-[#C6F432]/[0.05] scale-[1.008]'
-                : 'border-black/[0.08] dark:border-white/[0.1] hover:border-black/[0.2] dark:hover:border-white/[0.2] bg-[#F8FAFC]/50 dark:bg-[#151924]/40'
-            }`}
-          >
-            <div className="flex flex-col items-center gap-3">
-              <div className="w-12 h-12 rounded-2xl bg-white dark:bg-[#1E2332] border border-black/[0.08] dark:border-white/[0.1] shadow-sm flex items-center justify-center text-[#0071E3] dark:text-[#C6F432] transition-transform hover:scale-105">
-                <M3AirDropIcon className="w-6 h-6 text-inherit" filled />
-              </div>
-              <div>
-                <h3 className="font-display text-sm sm:text-base font-bold text-[#0F1115] dark:text-[#F3F4F6] tracking-tight">
-                  {isDraggingStage ? 'Release to Beam Instantly across Wi-Fi' : 'Drop Folders or Files Here to Beam'}
-                </h3>
-                <p className="text-xs text-[#64748B] dark:text-[#94A3B8] mt-1 max-w-md mx-auto">
-                  Nested directory trees preserved on disk in <code className="px-1.5 py-0.5 rounded bg-black/[0.04] dark:bg-white/[0.08] font-mono text-[11px] text-[#0F1115] dark:text-[#F3F4F6]">~/Downloads/AirBridge</code> • Up to 10GB
-                </p>
-              </div>
-
-              {/* Action Buttons within Drop Zone */}
-              <div className="flex items-center gap-2.5 mt-1">
-                <button
-                  type="button"
-                  onClick={handlePickFolder}
-                  className="apple-press flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold bg-[#F59E0B]/10 hover:bg-[#F59E0B]/20 text-[#D97706] dark:text-[#FBBF24] border border-[#F59E0B]/25 transition-colors shadow-xs"
-                >
-                  <FolderUp className="w-4 h-4 text-inherit" />
-                  <span>Choose Folder</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => fileInputRef.current?.click()}
-                  className="apple-press flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold bg-black/[0.05] hover:bg-black/[0.08] dark:bg-white/[0.08] dark:hover:bg-white/[0.12] text-[#0F1115] dark:text-white border border-black/[0.06] dark:border-white/[0.08] transition-colors shadow-xs"
-                >
-                  <M3FolderIcon className="w-4 h-4 text-[#0071E3] dark:text-[#38BDF8]" />
-                  <span>Choose Files</span>
-                </button>
-              </div>
-            </div>
-          </div>
-
-          {/* Row 3: 4 Tactile Action Chips */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-            <button
-              onClick={handlePickFolder}
-              className="apple-press min-h-[48px] flex items-center justify-center gap-2.5 px-4 py-2.5 rounded-2xl text-xs font-bold bg-[#F8FAFC] dark:bg-[#161B28] hover:bg-black/[0.04] dark:hover:bg-white/[0.08] text-[#0F1115] dark:text-[#F3F4F6] border border-black/[0.06] dark:border-white/[0.08] shadow-sm transition-colors"
-              title="Upload entire folder with folder hierarchy preserved"
-            >
-              <FolderUp className="w-4 h-4 text-[#F59E0B] shrink-0" />
-              <span className="truncate">Entire Folder</span>
-            </button>
-
-            <button
-              onClick={() => {
-                fileInputRef.current?.click();
-              }}
-              className="apple-press min-h-[48px] flex items-center justify-center gap-2.5 px-4 py-2.5 rounded-2xl text-xs font-bold bg-[#F8FAFC] dark:bg-[#161B28] hover:bg-black/[0.04] dark:hover:bg-white/[0.08] text-[#0F1115] dark:text-[#F3F4F6] border border-black/[0.06] dark:border-white/[0.08] shadow-sm transition-colors"
-            >
-              <M3FolderIcon className="w-4 h-4 text-[#0071E3] dark:text-[#38BDF8] shrink-0" />
-              <span className="truncate">All Files</span>
-            </button>
-
-            <button
-              onClick={() => {
-                mediaInputRef.current?.click();
-              }}
-              className="apple-press min-h-[48px] flex items-center justify-center gap-2.5 px-4 py-2.5 rounded-2xl text-xs font-bold bg-[#F8FAFC] dark:bg-[#161B28] hover:bg-black/[0.04] dark:hover:bg-white/[0.08] text-[#0F1115] dark:text-[#F3F4F6] border border-black/[0.06] dark:border-white/[0.08] shadow-sm transition-colors"
-            >
-              <M3PhotosIcon className="w-4 h-4 text-[#10B981] dark:text-[#C6F432] shrink-0" />
-              <span className="truncate">Photos & Video</span>
-            </button>
-
-            <button
-              onClick={() => {
-                if (onOpenCameraSnap) {
-                  onOpenCameraSnap();
-                } else {
-                  cameraInputRef.current?.click();
-                }
-              }}
-              className="apple-press min-h-[48px] flex items-center justify-center gap-2.5 px-4 py-2.5 rounded-2xl text-xs font-bold bg-[#F8FAFC] dark:bg-[#161B28] hover:bg-black/[0.04] dark:hover:bg-white/[0.08] text-[#0F1115] dark:text-[#F3F4F6] border border-black/[0.06] dark:border-white/[0.08] shadow-sm transition-colors"
-            >
-              <M3CameraIcon className="w-4 h-4 text-[#8B5CF6] dark:text-[#A78BFA] shrink-0" />
-              <span className="truncate">Camera</span>
-            </button>
-          </div>
-
-          {/* Beaming Progress Bar */}
-          <AnimatePresence>
-            {isUploading && (
-              <motion.div
-                initial={{ opacity: 0, height: 0 }}
-                animate={{ opacity: 1, height: 'auto' }}
-                exit={{ opacity: 0, height: 0 }}
-                transition={{ duration: 0.18 }}
-                className="pt-3 border-t border-black/[0.06] dark:border-white/[0.06]"
-              >
-                <div className="space-y-1.5">
-                  <div className="flex justify-between text-xs font-bold text-[#0F1115] dark:text-[#F3F4F6]">
-                    <span className="flex items-center gap-1.5 text-[#0071E3] dark:text-[#C6F432]">
-                      <Sparkles className="w-3.5 h-3.5 animate-spin" />
-                      Beaming files across Wi-Fi...
-                    </span>
-                    <span className="font-mono tabular-nums">{uploadProgress}%</span>
-                  </div>
-                  <div className="w-full h-1.5 rounded-full bg-black/[0.06] dark:bg-white/[0.1] overflow-hidden">
-                    <motion.div
-                      className="h-full bg-[#0071E3] dark:bg-[#C6F432] rounded-full"
-                      style={{ width: `${uploadProgress}%` }}
-                      transition={{ ease: "easeOut", duration: 0.15 }}
-                    />
-                  </div>
-                </div>
-              </motion.div>
-            )}
-          </AnimatePresence>
         </div>
       </div>
+
+      {/* Connected Peers Strip (only shown when nearby devices are online) */}
+      {otherDevices.length > 0 && (
+        <div className="mt-5 space-y-2.5">
+          <div className="flex items-center justify-between gap-2 px-1">
+            <span className="ab-kicker flex items-center gap-1.5">
+              Nearby ({otherDevices.length})
+              {selectedTargetIds.length > 0 && (
+                <span className="text-[10px] font-mono px-1.5 py-0.5 rounded-full" style={{ background: 'var(--accent-soft)', color: 'var(--accent)' }}>
+                  {selectedTargetIds.length} targeted
+                </span>
+              )}
+            </span>
+            {selectedTargetIds.length > 0 && (
+              <button onClick={() => onClearTargetDevices?.()} className="text-[11px] font-medium" style={{ color: 'var(--accent)' }}>
+                Clear
+              </button>
+            )}
+          </div>
+
+          <div className="flex items-center gap-2 overflow-x-auto pb-1 scrollbar-none">
+            {otherDevices.map((dev) => {
+              const isTargeted = selectedTargetIds.includes(dev.id);
+              const isDropHover = hoveredTargetPeerId === dev.id;
+              return (
+                <div
+                  key={dev.id}
+                  onClick={() => {
+                    if (onToggleTargetDevice) {
+                      if ('vibrate' in navigator) navigator.vibrate?.(8);
+                      onToggleTargetDevice(dev.id);
+                    } else {
+                      handleDeviceClick(dev);
+                    }
+                  }}
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setHoveredTargetPeerId(dev.id);
+                  }}
+                  onDragLeave={(e) => {
+                    e.stopPropagation();
+                    setHoveredTargetPeerId((c) => (c === dev.id ? null : c));
+                  }}
+                  onDrop={(e) => handlePeerDrop(e, dev.id)}
+                  className="apple-press flex items-center gap-2 px-3 py-2 rounded-xl shrink-0 cursor-pointer transition-all duration-150"
+                  style={{
+                    background: isDropHover || isTargeted ? 'var(--accent-soft)' : 'var(--surface-alt)',
+                    border: `1px solid ${isDropHover || isTargeted ? 'var(--accent)' : 'var(--border)'}`,
+                  }}
+                  title={`Click to target ${dev.name}`}
+                >
+                  <DeviceOsIcon os={dev.os} className="w-4 h-4 shrink-0" active />
+                  <div className="min-w-0">
+                    <p className="text-xs font-semibold truncate max-w-[100px]" style={{ color: 'var(--text-primary)' }}>
+                      {dev.name}
+                    </p>
+                    <p className="text-[10px] font-mono" style={{ color: 'var(--text-tertiary)' }}>
+                      {isDropHover ? 'Drop here' : dev.os}
+                    </p>
+                  </div>
+                  {dev.battery && <M3BatteryPill level={dev.battery.level} charging={dev.battery.charging} className="ml-0.5" />}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
     </div>
   );
 };

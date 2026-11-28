@@ -13,6 +13,49 @@ const validSessions = new Map();
 // Progressive lockout map for PIN attempts: ip -> { failedAttempts: number, lockedUntil: number }
 const pinLockouts = new Map();
 
+// Active WebSocket device-id -> Set of IPs registry to detect header spoofing
+const activeDeviceIps = new Map();
+
+function registerActiveDeviceIp(deviceId, ip) {
+  if (!deviceId || !ip) return;
+  const cleanId = String(deviceId).trim();
+  const cleanIp = String(ip).trim().toLowerCase().replace(/^::ffff:/, '');
+  if (!cleanId || !cleanIp) return;
+  let ips = activeDeviceIps.get(cleanId);
+  if (!ips) {
+    ips = new Set();
+    activeDeviceIps.set(cleanId, ips);
+  }
+  ips.add(cleanIp);
+}
+
+function unregisterActiveDeviceIp(deviceId, ip) {
+  if (!deviceId || !ip) return;
+  const cleanId = String(deviceId).trim();
+  const cleanIp = String(ip).trim().toLowerCase().replace(/^::ffff:/, '');
+  const ips = activeDeviceIps.get(cleanId);
+  if (ips) {
+    ips.delete(cleanIp);
+    if (ips.size === 0) {
+      activeDeviceIps.delete(cleanId);
+    }
+  }
+}
+
+/**
+ * Constant-time PIN comparator preventing timing side-channels
+ */
+function verifyPinTimingSafe(candidatePin, expectedPin) {
+  if (typeof expectedPin !== 'string' || expectedPin.length === 0) return false;
+  if (typeof candidatePin !== 'string') return false;
+  const cleanCandidate = candidatePin.trim();
+  const cleanExpected = expectedPin.trim();
+  if (!cleanCandidate || !cleanExpected || cleanCandidate.length !== cleanExpected.length) {
+    return false;
+  }
+  return crypto.timingSafeEqual(Buffer.from(cleanCandidate, 'utf8'), Buffer.from(cleanExpected, 'utf8'));
+}
+
 /**
  * Normalizes remote address to clean IP string
  */
@@ -110,8 +153,11 @@ function createCorsOriginValidator(serverPort) {
 
       const host = parsed.hostname.toLowerCase();
       const hostAddresses = getHostAddresses();
+      const osHostname = os.hostname().toLowerCase();
+      const cleanOsHost = osHostname.replace(/\.local$/, '');
+      const isOwnMdnsHost = host === osHostname || host === `${cleanOsHost}.local`;
 
-      if (hostAddresses.has(host) || host === 'localhost' || host.endsWith('.local')) {
+      if (hostAddresses.has(host) || host === 'localhost' || isOwnMdnsHost) {
         return callback(null, true);
       }
 
@@ -282,7 +328,7 @@ function extractVerifiedSession(req) {
 }
 
 /**
- * Extracts requesting client device ID from verified session or explicit device headers
+ * Extracts requesting client device ID from verified session or non-spoofed device headers
  */
 function getClientDeviceId(req) {
   const session = extractVerifiedSession(req);
@@ -298,7 +344,21 @@ function getClientDeviceId(req) {
   } else if (req.body && req.body.deviceId) {
     devId = req.body.deviceId;
   }
-  return devId ? String(devId).trim() : null;
+  if (!devId) return null;
+
+  const cleanId = String(devId).trim();
+  if (!cleanId) return null;
+
+  // Guard against device ID spoofing from another LAN IP when deviceId is actively held elsewhere
+  if (!isHostRequest(req)) {
+    const boundIps = activeDeviceIps.get(cleanId);
+    const remoteIp = getNormalizedRemoteAddress(req);
+    if (boundIps && boundIps.size > 0 && remoteIp && !boundIps.has(remoteIp)) {
+      return null;
+    }
+  }
+
+  return cleanId;
 }
 
 /**
@@ -337,11 +397,8 @@ function isAuthorizedRequest(req, state) {
   if (!isPinAuthed) {
     const rawPin = (req.headers['x-airbridge-pin'] || req.query.pin || (req.body && req.body.pin) || '');
     const clientPin = typeof rawPin === 'string' ? rawPin.trim() : String(rawPin).trim();
-    const expectedPin = typeof state.officeSecurity.pin === 'string' ? state.officeSecurity.pin.trim() : '';
-    if (expectedPin.length > 0 && clientPin.length === expectedPin.length) {
-      if (crypto.timingSafeEqual(Buffer.from(clientPin, 'utf8'), Buffer.from(expectedPin, 'utf8'))) {
-        isPinAuthed = true;
-      }
+    if (verifyPinTimingSafe(clientPin, state.officeSecurity.pin)) {
+      isPinAuthed = true;
     }
   }
 
@@ -404,6 +461,9 @@ module.exports = {
   recordFailedPinAttempt,
   resetPinAttempts,
   getPinLockoutInfo,
+  verifyPinTimingSafe,
+  registerActiveDeviceIp,
+  unregisterActiveDeviceIp,
   getClientDeviceId,
   isAuthorizedRequest,
   createRequireOfficeAuth,

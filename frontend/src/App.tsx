@@ -1,9 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion, AnimatePresence, MotionConfig } from 'framer-motion';
 import confetti from 'canvas-confetti';
-import { Download, Zap, ArrowRight, Volume2, Users, UserCheck, UserX, RefreshCw } from 'lucide-react';
-import { Header } from './components/Header';
-import { DynamicIsland } from './components/DynamicIsland';
+import { Download, Users, UserCheck, UserX, RefreshCw } from 'lucide-react';
+import { Header, ACCENT_PRESETS, type UiPreferences } from './components/Header';
 import { DragDropPortal } from './components/DragDropPortal';
 import { AirDropRadar } from './components/AirDropRadar';
 import { DevicePairingQR } from './components/DevicePairingQR';
@@ -16,25 +15,21 @@ import {
   M3ClipboardIcon,
   M3ChatIcon,
   M3ToolsIcon,
-  M3MacBookIcon,
-  M3WindowsPcIcon,
-  M3IosPhoneIcon,
-  M3LinuxIcon,
-  M3PhoneIcon,
-  M3SendIcon,
-  M3BatteryPill,
-  M3QrCodeIcon
 } from './components/M3Icons';
+import { getHostLabel } from './components/DeviceOsIcon';
 import { CameraRapidSnap } from './components/CameraRapidSnap';
 import { RingingModal } from './components/RingingModal';
 import { OnTheGoModal } from './components/OnTheGoModal';
 import { OfficeLockModal } from './components/OfficeLockModal';
 import { OfficeSecuritySettingsModal } from './components/OfficeSecuritySettingsModal';
 import { FolderBeamModal } from './components/FolderBeamModal';
-import { useWebSocket, deduplicateDevices } from './hooks/useWebSocket';
+import { CommandPaletteModal } from './components/CommandPaletteModal';
+import { useWebSocket, deduplicateDevices, type UploadedFileItem } from './hooks/useWebSocket';
 import { useTheme } from './hooks/useTheme';
 import { scanDataTransferItems, extractFilesFromList, type TraversedFile } from './utils/folderUpload';
-import { uploadFilesSmartly } from './utils/chunkedUpload';
+import { uploadFilesSmartly, type UploadProgressInfo } from './utils/chunkedUpload';
+import { downloadFileSafely } from './utils/download';
+import { getAuthHeaders } from './utils/device';
 
 export const App: React.FC = () => {
   const { theme, toggleTheme } = useTheme();
@@ -45,6 +40,11 @@ export const App: React.FC = () => {
     deviceName,
     updateDeviceName,
     serverInfo,
+    roomSettings,
+    roomFullInfo,
+    updateRoomSettings,
+    kickDevice,
+    retryConnection,
     isAndroid,
     isMac,
     isWindows,
@@ -94,21 +94,74 @@ export const App: React.FC = () => {
   const [isCameraSnapOpen, setIsCameraSnapOpen] = useState(false);
   const [isOnTheGoOpen, setIsOnTheGoOpen] = useState(false);
   const [isOfficeSecurityOpen, setIsOfficeSecurityOpen] = useState(false);
+  const [isCommandOpen, setIsCommandOpen] = useState(false);
   const [isApprovingReq, setIsApprovingReq] = useState(false);
   const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
 
-  // Global Drag & Drop State
+  const [uiPrefs, setUiPrefs] = useState<UiPreferences>(() => {
+    try {
+      const saved = localStorage.getItem('airbridge_ui_prefs');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        return {
+          accentColor: parsed.accentColor && ACCENT_PRESETS[parsed.accentColor as keyof typeof ACCENT_PRESETS] ? parsed.accentColor : 'blue',
+          confettiEnabled: parsed.confettiEnabled !== false,
+          soundEnabled: parsed.soundEnabled !== false,
+          compactStage: Boolean(parsed.compactStage),
+        };
+      }
+    } catch (_) {}
+    return {
+      accentColor: 'blue',
+      confettiEnabled: true,
+      soundEnabled: true,
+      compactStage: false,
+    };
+  });
+
+  const updateUiPrefs = (patch: Partial<UiPreferences>) => {
+    setUiPrefs((prev) => {
+      const next = { ...prev, ...patch };
+      try {
+        localStorage.setItem('airbridge_ui_prefs', JSON.stringify(next));
+      } catch (_) {}
+      return next;
+    });
+  };
+
+  useEffect(() => {
+    const preset = ACCENT_PRESETS[uiPrefs.accentColor] || ACCENT_PRESETS.blue;
+    const root = document.documentElement.style;
+    root.setProperty('--accent', theme === 'dark' ? preset.darkHex : preset.hex);
+    root.setProperty('--accent-soft', preset.soft);
+  }, [uiPrefs.accentColor, theme]);
+
+  // Global Drag & Drop + Targeted Peer State
   const [isGlobalDragging, setIsGlobalDragging] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
+  const [uploadProgressInfo, setUploadProgressInfo] = useState<UploadProgressInfo | null>(null);
+  const [selectedTargetIds, setSelectedTargetIds] = useState<string[]>([]);
 
-  // Folder Beam Confirmation Alert state (styled to website design system)
+  // Folder Beam Confirmation Alert state
   const [pendingFolderUpload, setPendingFolderUpload] = useState<{
     folderName: string;
     files: TraversedFile[];
+    targetIds?: string[];
   } | null>(null);
 
-  // Window-level Drag & Drop detection for immersive AirDrop feel
+  useEffect(() => {
+    const handleCmdK = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setIsCommandOpen((prev) => !prev);
+      }
+    };
+    window.addEventListener('keydown', handleCmdK);
+    return () => window.removeEventListener('keydown', handleCmdK);
+  }, []);
+
+  // Window-level Drag & Drop detection
   useEffect(() => {
     let dragCounter = 0;
 
@@ -161,40 +214,63 @@ export const App: React.FC = () => {
     };
   }, [deviceName]);
 
-  const executeUpload = async (files: TraversedFile[]) => {
+  const executeUpload = async (files: TraversedFile[], explicitTargetIds?: string[]) => {
     if (!files || files.length === 0) return;
 
+    const targetIds = explicitTargetIds && explicitTargetIds.length > 0 ? explicitTargetIds : selectedTargetIds;
     setIsUploading(true);
     setUploadProgress(5);
+    setUploadProgressInfo({
+      percent: 5,
+      currentFileName: files[0].file.name,
+      fileIndex: 1,
+      totalFiles: files.length,
+    });
 
     try {
-      await uploadFilesSmartly(files, deviceName, (progressInfo) => {
-        setUploadProgress(progressInfo.percent);
-      });
+      await uploadFilesSmartly(
+        files,
+        deviceName,
+        (progressInfo) => {
+          setUploadProgress(progressInfo.percent);
+          setUploadProgressInfo(progressInfo);
+        },
+        targetIds.length > 0 ? { recipients: targetIds } : undefined
+      );
 
       setIsUploading(false);
       setUploadProgress(0);
-      confetti({
-        particleCount: 40,
-        spread: 50,
-        origin: { y: 0.2 },
-        colors: ['#0071E3', '#34C759', '#5AC8FA'],
-      });
+      setUploadProgressInfo(null);
+      if ('vibrate' in navigator) navigator.vibrate?.([12, 30, 18]);
+      if (uiPrefs.confettiEnabled) {
+        confetti({
+          particleCount: 40,
+          spread: 50,
+          origin: { y: 0.25 },
+          colors: ['#3B82F6', '#10B981', '#60A5FA'],
+        });
+      }
       const hasFolder = files.some((item) => item.relativePath.includes('/'));
+      const privateSuffix = targetIds.length > 0 ? ` privately to ${targetIds.length} peer${targetIds.length > 1 ? 's' : ''}` : '';
       showToast(
         hasFolder
-          ? `Beamed folder structure (${files.length.toLocaleString()} files)`
-          : `Beamed ${files.length} file(s)`,
+          ? `Beamed folder (${files.length.toLocaleString()} files)${privateSuffix}`
+          : `Beamed ${files.length} file(s)${privateSuffix}`,
         'success'
       );
     } catch (err: any) {
       setIsUploading(false);
       setUploadProgress(0);
+      setUploadProgressInfo(null);
       showToast(err.message || 'Transfer failed', 'error');
     }
   };
 
-  const handleGlobalUpload = async (items: TraversedFile[] | FileList | File[], isFromInput = false) => {
+  const handleGlobalUpload = async (
+    items: TraversedFile[] | FileList | File[],
+    isFromInput = false,
+    explicitTargetIds?: string[]
+  ) => {
     if (!items || (items as any).length === 0) return;
 
     let normalized: TraversedFile[] = [];
@@ -213,14 +289,11 @@ export const App: React.FC = () => {
 
     if (normalized.length === 0) return;
 
-    // If selected via folder input picker: Chrome has already confirmed with the user,
-    // so start beaming immediately with zero redundant prompts!
     if (isFromInput) {
-      await executeUpload(normalized);
+      await executeUpload(normalized, explicitTargetIds);
       return;
     }
 
-    // If dragged & dropped onto the AirBridge radar: show our website's custom alert confirmation
     const hasDirectoryStructure = normalized.some((item) => item.relativePath.includes('/'));
     if (hasDirectoryStructure || normalized.length > 15) {
       let rootFolderName = 'Beam Folder';
@@ -234,15 +307,14 @@ export const App: React.FC = () => {
       setPendingFolderUpload({
         folderName: rootFolderName,
         files: normalized,
+        targetIds: explicitTargetIds,
       });
       return;
     }
 
-    // Direct upload for single files or small batches
-    await executeUpload(normalized);
+    await executeUpload(normalized, explicitTargetIds);
   };
 
-  // Capture PWA install prompt on Android / Chrome
   useEffect(() => {
     const handler = (e: Event) => {
       e.preventDefault();
@@ -266,25 +338,16 @@ export const App: React.FC = () => {
   };
 
   const cleanDevices = deduplicateDevices(devices);
-  const macCount = cleanDevices.filter((d) => d.os === 'macOS').length;
-  const androidCount = cleanDevices.filter((d) => d.os === 'Android').length;
-  const peerDevice = cleanDevices.find((d) => d.id !== myDeviceId && d.os === 'Android') || cleanDevices.find((d) => d.id !== myDeviceId) || null;
 
-  const [vaultFileCount, setVaultFileCount] = useState<number>(() => {
-    try {
-      const cached = localStorage.getItem('airbridge_cached_files');
-      if (cached) return JSON.parse(cached).length;
-    } catch (e) { }
-    return 0;
-  });
+  const [vaultFilesList, setVaultFilesList] = useState<UploadedFileItem[]>([]);
 
   useEffect(() => {
     const timer = setTimeout(() => {
-      fetch('/api/files')
+      fetch('/api/files', { headers: getAuthHeaders() })
         .then((r) => r.json())
         .then((d) => {
           if (d.files && Array.isArray(d.files)) {
-            setVaultFileCount(d.files.length);
+            setVaultFilesList(d.files);
           }
         })
         .catch(() => { });
@@ -300,7 +363,6 @@ export const App: React.FC = () => {
     } catch (e) { }
   };
 
-  // Sync tab with browser back/forward and URL hash changes
   useEffect(() => {
     const handleHashChange = () => {
       try {
@@ -326,35 +388,22 @@ export const App: React.FC = () => {
     } catch (e) { }
   }, [activeTab]);
 
+  const isDark = theme === 'dark';
+
   return (
-    <div className="min-h-screen bg-[#F2F4F7] text-[#0F1115] dark:bg-[#0A0B0E] dark:text-[#F3F4F6] flex flex-col font-sans selection:bg-[#0071E3] selection:text-white dark:selection:bg-white dark:selection:text-[#0B0D13] relative overflow-x-hidden transition-colors duration-200">
-      {/* Subtle Ambient Glows */}
-      <div className="ambient-bg">
-        <div className="ambient-orb-1" />
-        <div className="ambient-orb-2" />
-      </div>
+    <MotionConfig reducedMotion="user">
+    <div
+      className="min-h-screen flex flex-col font-sans selection:bg-[#3B82F6] selection:text-white relative overflow-x-hidden transition-colors duration-150"
+      style={{ background: 'var(--surface)', color: 'var(--text-primary)' }}
+    >
+      {/* Full-Screen Drag & Drop Portal */}
+      <DragDropPortal isDragging={isGlobalDragging} targetCount={selectedTargetIds.length} />
 
-      {/* Full-Screen Liquid Drag & Drop Portal */}
-      <DragDropPortal isDragging={isGlobalDragging} />
-
-      {/* Dynamic Island HUD at Top of Viewport */}
-      <DynamicIsland
-        isConnected={isConnected}
-        macCount={macCount}
-        androidCount={androidCount}
-        isTransferring={isUploading}
-        transferProgress={uploadProgress}
-        activeToast={activeToast}
-        onOpenQR={() => setIsQrOpen(true)}
-        onRingPhone={() => ringDevice('android')}
-        onPingMac={pingMac}
-        isMac={isMac}
-      />
-
-      {/* Bento Navigation Header with Light/Dark Theme Conversion */}
+      {/* Floating Apple Dynamic Island */}
       <Header
         isConnected={isConnected}
         devices={cleanDevices}
+        myDeviceId={myDeviceId}
         serverInfo={serverInfo}
         deviceName={deviceName}
         isAndroid={isAndroid}
@@ -362,79 +411,82 @@ export const App: React.FC = () => {
         isWindows={isWindows}
         officeSecurityEnabled={officeSecurityEnabled}
         officePin={officePin}
+        roomSettings={roomSettings}
+        uiPrefs={uiPrefs}
+        onUpdateUiPrefs={updateUiPrefs}
+        onUpdateRoomSettings={updateRoomSettings}
+        onKickDevice={kickDevice}
         theme={theme}
         activeTab={activeTab}
         onTabChange={handleTabChange}
         chatCount={chatMessages.length}
         clipboardCount={clipboardItems.length}
+        latestClipboard={clipboardItems[0] || null}
+        isTransferring={isUploading}
+        transferProgress={uploadProgress}
+        transferFileName={uploadProgressInfo?.currentFileName}
+        transferSpeedMBs={uploadProgressInfo?.speedMBs}
+        activeToast={activeToast}
         onToggleTheme={toggleTheme}
         onOpenQR={() => setIsQrOpen(true)}
         onOpenOnTheGo={() => setIsOnTheGoOpen(true)}
         onOpenSecuritySettings={() => setIsOfficeSecurityOpen(true)}
+        onOpenCommandPalette={() => setIsCommandOpen(true)}
         onUpdateName={updateDeviceName}
         onRingPhone={() => ringDevice('android')}
         onPingMac={pingHost}
+        onShowToast={showToast}
       />
 
-      {/* Main Container: Full-Width Expansive Executive Bento Canvas */}
-      <main className="relative z-10 flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-5 sm:py-7 space-y-6">
-        {/* Salesforce Executive Page Title & Status Banner */}
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-1">
-          <div>
-            <div className="flex items-center gap-2.5">
-              <h1 className="font-display text-2xl sm:text-3xl font-black text-[#0F1115] dark:text-[#F3F4F6] tracking-tight">
-                {activeTab === 'files' ? 'Office Shared Folder & AirDrop' : activeTab === 'clipboard' ? 'Live Clipboard' : activeTab === 'chat' ? 'Peer Chat' : 'Remote Suite'}
-              </h1>
-              <span className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[10px] font-bold font-mono bg-black/[0.04] dark:bg-white/[0.08] text-[#0071E3] dark:text-[#C6F432]">
-                <span className="w-1.5 h-1.5 rounded-full bg-[#10B981] animate-pulse" />
-                <span>{cleanDevices.length} ACTIVE {cleanDevices.length === 1 ? 'NODE' : 'NODES'}</span>
-              </span>
+      {/* Centered Single-Focus Content */}
+      <main className="relative z-10 flex-1 max-w-5xl w-full mx-auto px-3.5 sm:px-6 pt-16 sm:pt-24 pb-28 md:pb-12 space-y-6">
+        {/* Room Full Capacity Notice */}
+        {roomFullInfo && (
+          <div className="ab-card p-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 border-amber-500/40">
+            <div className="flex items-center gap-3 min-w-0">
+              <div className="w-10 h-10 rounded-xl bg-amber-500/10 text-amber-500 flex items-center justify-center shrink-0">
+                <Users className="w-5 h-5" />
+              </div>
+              <div className="min-w-0">
+                <h4 className="font-display text-sm font-bold" style={{ color: 'var(--text-primary)' }}>
+                  Room Capacity Reached ({roomFullInfo.currentCount}/{roomFullInfo.maxParticipants})
+                </h4>
+                <p className="text-xs mt-0.5" style={{ color: 'var(--text-secondary)' }}>
+                  This AirBridge room is currently limited to {roomFullInfo.maxParticipants} people. Ask the host to raise the limit in Dynamic Island.
+                </p>
+              </div>
             </div>
-            <p className="text-xs text-[#64748B] dark:text-[#94A3B8] mt-0.5">
-              Direct gigabit LAN transfer across Windows, macOS, Android, iPhone & Linux
-            </p>
-          </div>
-
-          <div className="flex items-center gap-2 self-start sm:self-auto">
-            <button
-              onClick={() => setIsQrOpen(true)}
-              className="apple-press flex items-center gap-1.5 px-3.5 py-2 rounded-2xl text-xs font-bold bg-white dark:bg-[#151924] hover:bg-black/[0.04] dark:hover:bg-white/[0.08] text-[#0F1115] dark:text-[#F3F4F6] border border-black/[0.06] dark:border-white/[0.08] shadow-sm transition-colors"
-            >
-              <M3QrCodeIcon className="w-3.5 h-3.5 text-[#0071E3] dark:text-[#C6F432]" />
-              <span>Pair Device</span>
+            <button onClick={retryConnection} className="ab-btn ab-btn-primary text-xs h-9 px-4 shrink-0">
+              <RefreshCw className="w-3.5 h-3.5" />
+              <span>Retry</span>
             </button>
           </div>
-        </div>
-
-        {/* Live Host Connection Approval Banner (1-Click Action for 5-Person Whitelist) */}
+        )}
+        {/* Live Host Connection Approval Banner */}
         <AnimatePresence>
           {serverInfo?.isHost && (serverInfo?.pendingApprovalRequests || []).length > 0 && (() => {
             const firstReq = serverInfo.pendingApprovalRequests![0];
             return (
               <motion.div
                 key="host-approval-banner"
-                initial={{ opacity: 0, y: -10, scale: 0.98 }}
-                animate={{ opacity: 1, y: 0, scale: 1 }}
-                exit={{ opacity: 0, y: -10, scale: 0.98, transition: { duration: 0.2 } }}
-                transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
-                className="rounded-3xl p-4 sm:p-5 bg-gradient-to-r from-[#0071E3]/15 via-[#38BDF8]/10 to-[#0071E3]/5 border-2 border-[#0071E3]/40 shadow-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4"
+                initial={{ opacity: 0, y: -8 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -8, transition: { duration: 0.16 } }}
+                transition={{ duration: 0.18 }}
+                className="ab-card p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4"
+                style={{ borderColor: 'var(--accent)' }}
               >
-                <div className="flex items-center gap-3.5 min-w-0">
-                  <div className="w-12 h-12 rounded-2xl bg-[#0071E3] text-white flex items-center justify-center shrink-0 shadow-md animate-pulse">
-                    <Users className="w-6 h-6" />
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className="w-9 h-9 rounded-lg flex items-center justify-center shrink-0" style={{ background: 'var(--accent-soft)', color: 'var(--accent)' }}>
+                    <Users className="w-4 h-4" />
                   </div>
                   <div className="min-w-0">
-                    <div className="flex items-center gap-2">
-                      <h4 className="font-display text-sm sm:text-base font-bold text-[#0F1115] dark:text-white">
-                        Colleague Connection Request ({serverInfo.pendingApprovalRequests!.length})
-                      </h4>
-                      <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-[#0071E3] text-white font-black">
-                        APPROVAL NEEDED
-                      </span>
-                    </div>
-                    <p className="text-xs text-[#64748B] dark:text-[#94A3B8] mt-0.5 truncate">
-                      <span className="font-bold text-[#0F1115] dark:text-white">{firstReq.name}</span>
-                      {' '}({firstReq.ip}) verified the PIN and is requesting access to your files.
+                    <h4 className="font-display text-sm font-bold" style={{ color: 'var(--text-primary)' }}>
+                      Connection Request ({serverInfo.pendingApprovalRequests!.length})
+                    </h4>
+                    <p className="text-xs truncate" style={{ color: 'var(--text-secondary)' }}>
+                      <span className="font-semibold" style={{ color: 'var(--text-primary)' }}>{firstReq.name}</span>
+                      {' '}({firstReq.ip}) verified the PIN
                     </p>
                   </div>
                 </div>
@@ -452,10 +504,10 @@ export const App: React.FC = () => {
                         setIsApprovingReq(false);
                       }
                     }}
-                    className="flex-1 sm:flex-none flex items-center justify-center gap-1.5 px-4 py-2 rounded-xl text-xs font-bold bg-[#10B981] hover:bg-[#059669] active:scale-95 text-white shadow-md transition-all duration-150 disabled:opacity-60 cursor-pointer"
+                    className="ab-btn flex-1 sm:flex-none bg-emerald-600 hover:bg-emerald-700 text-white text-xs h-8 px-3.5"
                   >
-                    {isApprovingReq ? <RefreshCw className="w-4 h-4 animate-spin" /> : <UserCheck className="w-4 h-4" />}
-                    <span>Approve Access</span>
+                    {isApprovingReq ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <UserCheck className="w-3.5 h-3.5" />}
+                    <span>Approve</span>
                   </button>
                   <button
                     type="button"
@@ -469,9 +521,9 @@ export const App: React.FC = () => {
                         setIsApprovingReq(false);
                       }
                     }}
-                    className="flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold bg-red-500 hover:bg-red-600 active:scale-95 text-white shadow-md transition-all duration-150 disabled:opacity-60 cursor-pointer"
+                    className="ab-btn bg-rose-600 hover:bg-rose-700 text-white text-xs h-8 px-3"
                   >
-                    <UserX className="w-4 h-4" />
+                    <UserX className="w-3.5 h-3.5" />
                     <span>Deny</span>
                   </button>
                 </div>
@@ -480,533 +532,189 @@ export const App: React.FC = () => {
           })()}
         </AnimatePresence>
 
-        {/* Executive 4-Card Bento Metric Deck (Salesforce / Cardiology Architecture) */}
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3.5 sm:gap-4.5">
-          {/* Card 1: Host Mac/Windows Hardware */}
-          <div className="bento-card rounded-3xl p-4 sm:p-5 flex flex-col justify-between transition-transform hover:scale-[1.01]">
-            <div className="flex items-center justify-between gap-2">
-              <span className="text-[10px] sm:text-[11px] font-bold uppercase tracking-wider text-[#64748B] dark:text-[#94A3B8]">
-                Host Node
-              </span>
-              <span className="w-2 h-2 rounded-full bg-[#10B981] animate-pulse" />
+        {/* Android PWA Install Banner */}
+        {isAndroid && deferredPrompt && (
+          <div className="ab-card p-3.5 flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2.5 min-w-0">
+              <div className="w-8 h-8 rounded-lg bg-emerald-500/10 text-emerald-500 flex items-center justify-center shrink-0">
+                <Download className="w-4 h-4" />
+              </div>
+              <div className="min-w-0">
+                <h4 className="font-display text-xs font-bold truncate" style={{ color: 'var(--text-primary)' }}>Install AirBridge</h4>
+                <p className="text-[11px] truncate" style={{ color: 'var(--text-tertiary)' }}>Add to Home Screen</p>
+              </div>
             </div>
-            <div className="mt-3">
-              <h4 className="font-display text-base sm:text-lg font-bold text-[#0F1115] dark:text-[#F3F4F6] truncate tracking-tight">
-                {deviceName}
-              </h4>
-              <p className="text-xs text-[#64748B] dark:text-[#94A3B8] font-mono truncate mt-0.5">
-                Local Host • {serverInfo?.os || (isWindows ? 'Windows' : isMac ? 'macOS' : 'Host')}
-              </p>
-            </div>
+            <button onClick={handleInstallPwa} className="ab-btn bg-emerald-600 text-white text-xs h-8 px-3 shrink-0">
+              Install
+            </button>
           </div>
+        )}
 
-          {/* Card 2: Connected Peer or Office Mesh */}
+        {/* Mobile Bottom Navigation */}
+        <div className="md:hidden fixed bottom-[max(0.75rem,env(safe-area-inset-bottom))] inset-x-3 z-30 pointer-events-none">
           <div
-            onClick={() => {
-              if (!peerDevice) setIsQrOpen(true);
+            className="pointer-events-auto w-full max-w-md mx-auto grid grid-cols-4 p-1 rounded-2xl backdrop-blur-md shadow-lg"
+            style={{
+              background: isDark ? 'rgba(17, 17, 19, 0.94)' : 'rgba(255, 255, 255, 0.95)',
+              border: '1px solid var(--border)',
             }}
-            className={`bento-card rounded-3xl p-4 sm:p-5 flex flex-col justify-between transition-transform hover:scale-[1.01] ${!peerDevice ? 'cursor-pointer border-dashed border-[#0071E3]/30 dark:border-white/20' : ''}`}
           >
-            <div className="flex items-center justify-between gap-2">
-              <span className="text-[10px] sm:text-[11px] font-bold uppercase tracking-wider text-[#64748B] dark:text-[#94A3B8]">
-                {peerDevice ? 'Live Peer' : cleanDevices.length > 1 ? 'Office Mesh' : 'Peer Target'}
-              </span>
-              <span className={`w-2 h-2 rounded-full ${cleanDevices.length > 1 ? 'bg-[#10B981]' : 'bg-[#F59E0B] animate-pulse'}`} />
-            </div>
-            <div className="mt-3">
-              <h4 className="font-display text-base sm:text-lg font-bold text-[#0F1115] dark:text-[#F3F4F6] truncate tracking-tight">
-                {peerDevice ? peerDevice.name : cleanDevices.length > 1 ? `${cleanDevices.length - 1} Office Peers` : 'Tap to Pair Device'}
-              </h4>
-              <p className="text-xs text-[#64748B] dark:text-[#94A3B8] font-mono truncate mt-0.5">
-                {peerDevice ? `${peerDevice.os} • Direct LAN` : cleanDevices.length > 1 ? 'Windows, Mac, Phone • Direct' : 'Scan QR code to connect'}
-              </p>
-            </div>
-          </div>
-
-          {/* Card 3: P2P Wireless Link */}
-          <div className="bento-card rounded-3xl p-4 sm:p-5 flex flex-col justify-between transition-transform hover:scale-[1.01]">
-            <div className="flex items-center justify-between gap-2">
-              <span className="text-[10px] sm:text-[11px] font-bold uppercase tracking-wider text-[#64748B] dark:text-[#94A3B8]">
-                Link Latency
-              </span>
-              <span className="text-[10px] text-[#10B981] dark:text-[#C6F432] font-bold font-mono">0 JITTER</span>
-            </div>
-            <div className="mt-3">
-              <div className="flex items-baseline gap-1.5">
-                <span className="font-display text-xl sm:text-2xl font-black text-[#0F1115] dark:text-[#F3F4F6]">
-                  1.2 ms
-                </span>
-              </div>
-              <p className="text-xs text-[#64748B] dark:text-[#94A3B8] font-mono truncate mt-0.5">
-                Direct LAN • Zero Cloud Hops
-              </p>
-            </div>
-          </div>
-
-          {/* Card 4: Vault & Files */}
-          <div className="bento-card rounded-3xl p-4 sm:p-5 flex flex-col justify-between transition-transform hover:scale-[1.01]">
-            <div className="flex items-center justify-between gap-2">
-              <span className="text-[10px] sm:text-[11px] font-bold uppercase tracking-wider text-[#64748B] dark:text-[#94A3B8]">
-                AirBridge Vault
-              </span>
-              <span className="text-[10px] font-mono font-bold text-[#8B5CF6]">LOCAL</span>
-            </div>
-            <div className="mt-3">
-              <div className="flex items-baseline gap-1.5">
-                <span className="font-display text-xl sm:text-2xl font-black text-[#0F1115] dark:text-[#F3F4F6]">
-                  {vaultFileCount} {vaultFileCount === 1 ? 'item' : 'items'}
-                </span>
-              </div>
-              <p className="text-xs text-[#64748B] dark:text-[#94A3B8] font-mono truncate mt-0.5">
-                ~/Downloads/AirBridge
-              </p>
-            </div>
-          </div>
-    </div>
-
-        {/* Android PWA Install Banner */ }
-  {
-    isAndroid && deferredPrompt && (
-      <div className="bento-card rounded-2xl p-3.5 flex items-center justify-between gap-3 border border-[#10B981]/20">
-        <div className="flex items-center gap-2.5 min-w-0">
-          <div className="w-8 h-8 rounded-xl bg-[#10B981]/15 text-[#10B981] flex items-center justify-center shrink-0">
-            <Download className="w-4 h-4" />
-          </div>
-          <div className="min-w-0">
-            <h4 className="font-display text-xs font-bold text-[#0F1115] dark:text-[#F3F4F6] truncate">Install AirBridge</h4>
-            <p className="text-[11px] text-[#64748B] dark:text-[#94A3B8] truncate">Run full screen from Home Screen</p>
-          </div>
-        </div>
-        <button
-          onClick={handleInstallPwa}
-          className="apple-press px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-[#10B981] text-white shrink-0 shadow-sm"
-        >
-          Install
-        </button>
-      </div>
-    )
-  }
-
-        {/* Mobile-Only Bento Segmented Navigation Bar (Equal Touch Targets & Smooth iOS Pill) */}
-        <div className="flex md:hidden justify-center pb-2 px-1">
-          <div className="w-full max-w-sm grid grid-cols-4 p-1 rounded-2xl bg-black/[0.04] dark:bg-white/[0.06] border border-black/[0.04] dark:border-white/[0.06] relative">
-            {/* AirDrop Tab */}
-            <button
-              onClick={() => handleTabChange('files')}
-              className={`apple-press relative z-10 flex items-center justify-center gap-1 py-2 px-1 rounded-xl text-xs transition-colors shrink-0 ${activeTab === 'files'
-                ? 'text-white dark:text-[#0A0D14] font-bold'
-                : 'text-[#64748B] dark:text-[#94A3B8] hover:text-[#0F1115] dark:hover:text-white font-medium'
-                }`}
-            >
-              {activeTab === 'files' && (
-                <motion.div
-                  layoutId="activeBentoTabPill"
-                  className="absolute inset-0 bg-[#0F1115] dark:bg-[#C6F432] rounded-xl shadow-sm dark:shadow-[0_2px_10px_rgba(198,244,50,0.3)]"
-                  transition={{ type: "spring", bounce: 0.14, duration: 0.28 }}
-                />
-              )}
-              <span className="relative z-10 flex items-center gap-1">
-                <M3AirDropIcon
-                  className={`w-3.5 h-3.5 ${activeTab === 'files'
-                    ? 'text-white dark:text-[#0A0D14]'
-                    : 'text-[#0071E3] dark:text-[#38BDF8]'
-                    }`}
-                  filled={activeTab === 'files'}
-                />
-                <span className="font-display tracking-tight text-[11px] sm:text-xs">AirDrop</span>
-              </span>
-            </button>
-
-            {/* Live Clipboard Tab */}
-            <button
-              onClick={() => handleTabChange('clipboard')}
-              className={`apple-press relative z-10 flex items-center justify-center gap-1 py-2 px-1 rounded-xl text-xs transition-colors shrink-0 ${activeTab === 'clipboard'
-                ? 'text-white dark:text-[#0A0D14] font-bold'
-                : 'text-[#64748B] dark:text-[#94A3B8] hover:text-[#0F1115] dark:hover:text-white font-medium'
-                }`}
-            >
-              {activeTab === 'clipboard' && (
-                <motion.div
-                  layoutId="activeBentoTabPill"
-                  className="absolute inset-0 bg-[#0F1115] dark:bg-[#C6F432] rounded-xl shadow-sm dark:shadow-[0_2px_10px_rgba(198,244,50,0.3)]"
-                  transition={{ type: "spring", bounce: 0.14, duration: 0.28 }}
-                />
-              )}
-              <span className="relative z-10 flex items-center gap-1">
-                <M3ClipboardIcon
-                  className={`w-3.5 h-3.5 ${activeTab === 'clipboard'
-                    ? 'text-white dark:text-[#0A0D14]'
-                    : 'text-[#10B981] dark:text-[#34D399]'
-                    }`}
-                  filled={activeTab === 'clipboard'}
-                />
-                <span className="font-display tracking-tight text-[11px] sm:text-xs">Clip</span>
-                {clipboardItems.length > 0 && (
-                  <span className={`text-[9px] px-1 py-0.2 rounded-full font-mono tabular-nums ${activeTab === 'clipboard'
-                    ? 'bg-white/20 dark:bg-black/20 text-inherit'
-                    : 'bg-black/[0.06] dark:bg-white/[0.08] text-[#64748B] dark:text-[#94A3B8]'
-                    }`}>
-                    {clipboardItems.length}
-                  </span>
-                )}
-              </span>
-            </button>
-
-            {/* Chat Tab */}
-            <button
-              onClick={() => handleTabChange('chat')}
-              className={`apple-press relative z-10 flex items-center justify-center gap-1 py-2 px-1 rounded-xl text-xs transition-colors shrink-0 ${activeTab === 'chat'
-                ? 'text-white dark:text-[#0A0D14] font-bold'
-                : 'text-[#64748B] dark:text-[#94A3B8] hover:text-[#0F1115] dark:hover:text-white font-medium'
-                }`}
-            >
-              {activeTab === 'chat' && (
-                <motion.div
-                  layoutId="activeBentoTabPill"
-                  className="absolute inset-0 bg-[#0F1115] dark:bg-[#C6F432] rounded-xl shadow-sm dark:shadow-[0_2px_10px_rgba(198,244,50,0.3)]"
-                  transition={{ type: "spring", bounce: 0.14, duration: 0.28 }}
-                />
-              )}
-              <span className="relative z-10 flex items-center gap-1">
-                <M3ChatIcon
-                  className={`w-3.5 h-3.5 ${activeTab === 'chat'
-                    ? 'text-white dark:text-[#0A0D14]'
-                    : 'text-[#0071E3] dark:text-[#38BDF8]'
-                    }`}
-                  filled={activeTab === 'chat'}
-                />
-                <span className="font-display tracking-tight text-[11px] sm:text-xs">Chat</span>
-                {chatMessages.length > 0 && (
-                  <span className={`text-[9px] px-1 py-0.2 rounded-full font-mono font-bold tabular-nums ${activeTab === 'chat'
-                    ? 'bg-white/20 dark:bg-black/20 text-inherit'
-                    : 'bg-[#0071E3]/15 dark:bg-white/10 text-[#0071E3] dark:text-[#38BDF8]'
-                    }`}>
-                    {chatMessages.length}
-                  </span>
-                )}
-              </span>
-            </button>
-
-            {/* Remote & Tools Tab */}
-            <button
-              onClick={() => handleTabChange('tools')}
-              className={`apple-press relative z-10 flex items-center justify-center gap-1 py-2 px-1 rounded-xl text-xs transition-colors shrink-0 ${activeTab === 'tools'
-                ? 'text-white dark:text-[#0A0D14] font-bold'
-                : 'text-[#64748B] dark:text-[#94A3B8] hover:text-[#0F1115] dark:hover:text-white font-medium'
-                }`}
-            >
-              {activeTab === 'tools' && (
-                <motion.div
-                  layoutId="activeBentoTabPill"
-                  className="absolute inset-0 bg-[#0F1115] dark:bg-[#C6F432] rounded-xl shadow-sm dark:shadow-[0_2px_10px_rgba(198,244,50,0.3)]"
-                  transition={{ type: "spring", bounce: 0.14, duration: 0.28 }}
-                />
-              )}
-              <span className="relative z-10 flex items-center gap-1">
-                <M3ToolsIcon
-                  className={`w-3.5 h-3.5 ${activeTab === 'tools'
-                    ? 'text-white dark:text-[#0A0D14]'
-                    : 'text-[#8B5CF6] dark:text-[#A78BFA]'
-                    }`}
-                  filled={activeTab === 'tools'}
-                />
-                <span className="font-display tracking-tight text-[11px] sm:text-xs">Tools</span>
-              </span>
-            </button>
-          </div>
-        </div>
-
-        {/* Tab Views with Snappy Crossfade (No Layout Collapsing) */}
-        <AnimatePresence mode="popLayout" initial={false}>
-    {activeTab === 'files' && (
-      <motion.div
-        key="files"
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        exit={{ opacity: 0 }}
-        transition={{ duration: 0.12, ease: "easeOut" }}
-        className="space-y-6"
-      >
-        {/* 1. Full-Width Expansive Hero AirDrop Stage */}
-        <AirDropRadar
-          devices={cleanDevices}
-          myDeviceId={myDeviceId}
-          serverInfo={serverInfo}
-          isMac={isMac}
-          isAndroid={isAndroid}
-          isWindows={isWindows}
-          officeSecurityEnabled={officeSecurityEnabled}
-          officePin={officePin}
-          onOpenSecuritySettings={() => setIsOfficeSecurityOpen(true)}
-          deviceName={deviceName}
-          isUploading={isUploading}
-          uploadProgress={uploadProgress}
-          onOpenQR={() => setIsQrOpen(true)}
-          onRingDevice={ringDevice}
-          onDropFiles={handleGlobalUpload}
-          onOpenCameraSnap={() => setIsCameraSnapOpen(true)}
-        />
-        {/* 2. Salesforce Signature Bento Container housing Vault Stream (Left 7 cols) & Companion Deck (Right 5 cols) */}
-        <FileTransfer
-          isAndroid={isAndroid}
-          isMac={isMac}
-          isWindows={isWindows}
-          serverInfo={serverInfo}
-          recentFiles={recentUploadedFiles}
-          showToast={showToast}
-          companionDeck={
-            <div className="bg-[#F8FAFC] dark:bg-[#141926] rounded-2xl p-4 sm:p-5 border border-black/[0.06] dark:border-white/[0.06] space-y-4 transition-colors">
-              {/* Active Hardware Vitals */}
-              <div className="space-y-2.5 pb-3 border-b border-black/[0.06] dark:border-white/[0.06]">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <span className="w-2 h-2 rounded-full bg-[#10B981] animate-pulse" />
-                    <h4 className="font-display text-xs font-bold text-[#0F1115] dark:text-white tracking-tight">
-                      Connected Hardware
-                    </h4>
-                  </div>
-                  <button
-                    onClick={() => handleTabChange('tools')}
-                    className="apple-press text-[11px] font-semibold text-[#0071E3] dark:text-[#C6F432] hover:underline flex items-center gap-1"
-                  >
-                    <span>Manage</span>
-                    <ArrowRight className="w-3 h-3" />
-                  </button>
-                </div>
-
-                <div className="space-y-1.5">
-                  {(cleanDevices.length > 0 ? cleanDevices.slice(0, 3) : [
-                    { id: 'host', name: deviceName, os: (isWindows ? 'Windows' : isMac ? 'macOS' : 'Host') as any, ip: serverInfo?.primaryIp || '127.0.0.1', connectedAt: Date.now(), battery: null }
-                  ]).map((dev) => {
-                    const devOs = dev.os || 'unknown';
-                    return (
-                      <div
-                        key={dev.id}
-                        className="flex items-center justify-between p-2.5 rounded-xl bg-white dark:bg-white/[0.04] border border-black/[0.04] dark:border-white/[0.06] shadow-xs"
-                      >
-                        <div className="flex items-center gap-2.5 min-w-0">
-                          <div className="w-7 h-7 rounded-lg bg-[#F1F5F9] dark:bg-white/[0.08] flex items-center justify-center shrink-0">
-                            {devOs === 'Windows' ? (
-                              <M3WindowsPcIcon className="w-4 h-4 text-[#0078D4]" active={true} />
-                            ) : devOs === 'macOS' ? (
-                              <M3MacBookIcon className="w-4 h-4 text-[#0071E3] dark:text-white" active={true} />
-                            ) : devOs === 'iOS' ? (
-                              <M3IosPhoneIcon className="w-4 h-4 text-[#6366F1]" active={true} />
-                            ) : devOs === 'Linux' ? (
-                              <M3LinuxIcon className="w-4 h-4 text-[#F59E0B]" />
-                            ) : (
-                              <M3PhoneIcon className="w-4 h-4 text-[#10B981]" active={true} />
-                            )}
-                          </div>
-                          <div className="min-w-0">
-                            <p className="font-display text-xs font-bold text-[#0F1115] dark:text-white truncate">{dev.name}</p>
-                            <p className="text-[10px] text-[#64748B] dark:text-[#94A3B8] font-mono truncate">{dev.os} • Direct LAN</p>
-                          </div>
-                        </div>
-                        {dev.battery ? (
-                          <M3BatteryPill level={dev.battery.level} charging={dev.battery.charging} />
-                        ) : (
-                          <span className="text-[10px] font-semibold text-[#64748B] dark:text-[#94A3B8] bg-black/[0.04] dark:bg-white/[0.06] px-2 py-0.5 rounded-full font-mono">
-                            Node
-                          </span>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-
-              {/* Live Universal Clipboard */}
-              <div className="space-y-2 pb-3 border-b border-black/[0.06] dark:border-white/[0.06]">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <M3ClipboardIcon className="w-3.5 h-3.5 text-[#10B981]" filled />
-                    <h4 className="font-display text-xs font-bold text-[#0F1115] dark:text-white tracking-tight">
-                      Live Clipboard
-                    </h4>
-                  </div>
-                  <button
-                    onClick={() => handleTabChange('clipboard')}
-                    className="apple-press text-[11px] font-semibold text-[#0071E3] dark:text-[#C6F432] hover:underline flex items-center gap-1"
-                  >
-                    <span>History</span>
-                    <ArrowRight className="w-3 h-3" />
-                  </button>
-                </div>
-                {clipboardItems.length > 0 ? (
-                  <div className="p-2.5 rounded-xl bg-white dark:bg-white/[0.04] border border-black/[0.04] dark:border-white/[0.06] flex items-center justify-between gap-2 shadow-xs">
-                    <p className="text-xs text-[#0F1115] dark:text-white truncate font-mono flex-1">
-                      {clipboardItems[0].text}
-                    </p>
-                    <button
-                      onClick={async () => {
-                        const { copyToClipboard } = await import('./utils/clipboard');
-                        const ok = await copyToClipboard(clipboardItems[0].text);
-                        if (ok) showToast('Copied to clipboard');
-                      }}
-                      className="apple-press px-2.5 py-1 rounded-lg text-[11px] font-bold bg-[#0F1115] hover:bg-black text-white dark:bg-[#C6F432] dark:hover:bg-[#B5E22B] dark:text-[#0A0D14] shrink-0"
-                    >
-                      Copy
-                    </button>
-                  </div>
-                ) : (
-                  <p className="text-xs text-[#64748B] dark:text-[#94A3B8] py-1 text-center font-sans">
-                    Clipboard synced across devices
-                  </p>
-                )}
-              </div>
-
-              {/* Quick Peer Beam */}
-              <div className="space-y-2.5 pb-3 border-b border-black/[0.06] dark:border-white/[0.06]">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <M3ChatIcon className="w-3.5 h-3.5 text-[#0071E3] dark:text-[#38BDF8]" filled />
-                    <h4 className="font-display text-xs font-bold text-[#0F1115] dark:text-white tracking-tight">
-                      Quick Peer Beam
-                    </h4>
-                  </div>
-                  <button
-                    onClick={() => handleTabChange('chat')}
-                    className="apple-press text-[11px] font-semibold text-[#0071E3] dark:text-[#38BDF8] hover:underline flex items-center gap-1"
-                  >
-                    <span>Full Chat</span>
-                    <ArrowRight className="w-3 h-3" />
-                  </button>
-                </div>
-                <div className="space-y-1.5 max-h-36 overflow-y-auto pr-1">
-                  {chatMessages.length === 0 ? (
-                    <p className="text-xs text-[#64748B] dark:text-[#94A3B8] py-2 text-center">
-                      Beam a message, code snippet, or link below.
-                    </p>
-                  ) : (
-                    chatMessages.slice(-2).map((msg) => {
-                      const isMe = msg.fromId === myDeviceId || (msg.from && msg.from.toLowerCase() === deviceName.toLowerCase());
-                      return (
-                        <div key={msg.id} className={`flex flex-col ${isMe ? 'items-end' : 'items-start'}`}>
-                          <div className={`px-2.5 py-1.5 rounded-xl text-xs max-w-[90%] break-words ${isMe
-                            ? 'bg-[#0F1115] text-white font-medium dark:bg-[#C6F432] dark:text-[#0A0D14] dark:font-bold'
-                            : 'bg-black/[0.05] text-[#0F1115] dark:bg-white/[0.08] dark:text-white'
-                            }`}>
-                            {msg.text}
-                          </div>
-                        </div>
-                      );
-                    })
-                  )}
-                </div>
-                <form
-                  onSubmit={(e) => {
-                    e.preventDefault();
-                    const input = (e.currentTarget.elements.namedItem('quickMsg') as HTMLInputElement);
-                    if (input && input.value.trim()) {
-                      sendChatMessage(input.value.trim());
-                      input.value = '';
-                    }
+            {(
+              [
+                { id: 'files', label: 'Transfer', icon: <M3AirDropIcon className="w-4 h-4" filled={activeTab === 'files'} /> },
+                { id: 'clipboard', label: 'Clip', icon: <M3ClipboardIcon className="w-4 h-4" filled={activeTab === 'clipboard'} />, badge: clipboardItems.length },
+                { id: 'chat', label: 'Chat', icon: <M3ChatIcon className="w-4 h-4" filled={activeTab === 'chat'} />, badge: chatMessages.length },
+                { id: 'tools', label: 'Tools', icon: <M3ToolsIcon className="w-4 h-4" filled={activeTab === 'tools'} /> },
+              ] as { id: TabType; label: string; icon: React.ReactNode; badge?: number }[]
+            ).map((tab) => {
+              const active = activeTab === tab.id;
+              return (
+                <button
+                  key={tab.id}
+                  onClick={() => handleTabChange(tab.id)}
+                  className="relative flex flex-col items-center justify-center gap-0.5 py-1.5 px-1 rounded-xl text-xs transition-colors"
+                  style={{
+                    color: active ? (isDark ? '#111113' : '#FFFFFF') : 'var(--text-secondary)',
+                    fontWeight: active ? 600 : 500,
                   }}
-                  className="flex items-center gap-2 pt-1"
                 >
-                  <input
-                    name="quickMsg"
-                    type="text"
-                    placeholder="Type note or link to beam..."
-                    className="flex-1 bg-white dark:bg-white/[0.06] border border-black/[0.08] dark:border-white/[0.08] rounded-xl px-3 py-1.5 text-xs text-[#0F1115] dark:text-white placeholder-[#64748B] dark:placeholder-[#94A3B8] focus:outline-none focus:ring-1 focus:ring-[#0071E3] dark:focus:ring-[#C6F432]"
-                  />
-                  <button
-                    type="submit"
-                    className="apple-press p-2 rounded-xl bg-[#0F1115] hover:bg-black text-white dark:bg-[#C6F432] dark:text-[#0A0D14] font-bold shadow-sm shrink-0"
-                  >
-                    <M3SendIcon className="w-3.5 h-3.5 text-white dark:text-[#0A0D14]" />
-                  </button>
-                </form>
-              </div>
-
-              {/* Remote Sound Actions */}
-              <div className="grid grid-cols-2 gap-2 pt-1">
-                <button
-                  onClick={() => ringDevice('android')}
-                  className="apple-press flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold bg-[#10B981]/10 dark:bg-[#10B981]/15 text-[#10B981] border border-[#10B981]/20 dark:border-[#10B981]/30 hover:bg-[#10B981]/15 dark:hover:bg-[#10B981]/25 transition-colors"
-                >
-                  <Volume2 className="w-3.5 h-3.5" />
-                  <span>Ring Phone</span>
+                  {active && (
+                    <motion.div
+                      layoutId="mobileNavPill"
+                      className="absolute inset-0 rounded-xl"
+                      style={{ background: 'var(--text-primary)' }}
+                      transition={{ type: "spring", stiffness: 500, damping: 36 }}
+                    />
+                  )}
+                  <span className="relative z-10 flex items-center justify-center">
+                    {tab.icon}
+                    {tab.badge && tab.badge > 0 ? (
+                      <span
+                        className={`ml-1 inline-flex items-center justify-center text-[9px] px-1 py-0.5 leading-none rounded-full font-mono tabular-nums ${
+                          active ? 'bg-white/20 dark:bg-black/15' : 'bg-black/[0.06] dark:bg-white/[0.08]'
+                        }`}
+                      >
+                        {tab.badge}
+                      </span>
+                    ) : null}
+                  </span>
+                  <span className="relative z-10 font-display text-[10px] leading-tight">{tab.label}</span>
                 </button>
+              );
+            })}
+          </div>
+        </div>
 
-                <button
-                  onClick={pingMac}
-                  className="apple-press flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold bg-[#0071E3]/10 dark:bg-[#C6F432]/15 text-[#0071E3] dark:text-[#C6F432] border border-[#0071E3]/20 dark:border-[#C6F432]/30 hover:bg-[#0071E3]/15 dark:hover:bg-[#C6F432]/25 transition-colors"
-                >
-                  <Zap className="w-3.5 h-3.5" />
-                  <span>Ping Mac</span>
-                </button>
-              </div>
-            </div>
-          }
-        />
-      </motion.div>
-    )}
+        {/* Tab Views — immediate mount with crisp fade (no blank wait frame) */}
+        {activeTab === 'files' && (
+          <motion.div
+            key="files"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ duration: 0.14, ease: 'easeOut' }}
+            className="space-y-8"
+          >
+            <AirDropRadar
+              devices={cleanDevices}
+              myDeviceId={myDeviceId}
+              serverInfo={serverInfo}
+              isMac={isMac}
+              isAndroid={isAndroid}
+              isWindows={isWindows}
+              officeSecurityEnabled={officeSecurityEnabled}
+              officePin={officePin}
+              onOpenSecuritySettings={() => setIsOfficeSecurityOpen(true)}
+              deviceName={deviceName}
+              isUploading={isUploading}
+              uploadProgress={uploadProgress}
+              uploadProgressInfo={uploadProgressInfo}
+              selectedTargetIds={selectedTargetIds}
+              onToggleTargetDevice={(id) =>
+                setSelectedTargetIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
+              }
+              onClearTargetDevices={() => setSelectedTargetIds([])}
+              onOpenQR={() => setIsQrOpen(true)}
+              onRingDevice={ringDevice}
+              onDropFiles={handleGlobalUpload}
+              onOpenCameraSnap={() => setIsCameraSnapOpen(true)}
+              compactStage={uiPrefs.compactStage}
+              uploadsDisabled={!serverInfo?.isHost && roomSettings.allowUploads === false}
+            />
+            <FileTransfer
+              isAndroid={isAndroid}
+              isMac={isMac}
+              isWindows={isWindows}
+              serverInfo={serverInfo}
+              recentFiles={recentUploadedFiles}
+              showToast={showToast}
+            />
+          </motion.div>
+        )}
 
-    {activeTab === 'clipboard' && (
-      <motion.div
-        key="clipboard"
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        exit={{ opacity: 0 }}
-        transition={{ duration: 0.12, ease: "easeOut" }}
-      >
-        <UniversalClipboard
-          items={clipboardItems}
-          onSendClipboard={sendClipboard}
-          onClearClipboard={clearClipboard}
-          isAndroid={isAndroid}
-          isMac={isMac}
-          showToast={showToast}
-        />
-      </motion.div>
-    )}
+        {activeTab === 'clipboard' && (
+          <motion.div
+            key="clipboard"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ duration: 0.14, ease: 'easeOut' }}
+          >
+            <UniversalClipboard
+              items={clipboardItems}
+              onSendClipboard={sendClipboard}
+              onClearClipboard={clearClipboard}
+              isAndroid={isAndroid}
+              isMac={isMac}
+              isWindows={isWindows}
+              hostLabel={getHostLabel(serverInfo)}
+              showToast={showToast}
+            />
+          </motion.div>
+        )}
 
-    {activeTab === 'chat' && (
-      <motion.div
-        key="chat"
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        exit={{ opacity: 0 }}
-        transition={{ duration: 0.12, ease: "easeOut" }}
-      >
-        <PeerChat
-          devices={cleanDevices}
-          myDeviceId={myDeviceId}
-          deviceName={deviceName}
-          chatMessages={chatMessages}
-          onSendMessage={sendChatMessage}
-          onRingDevice={ringDevice}
-          onClearChat={clearChat}
-          showToast={showToast}
-          isMac={isMac}
-          isAndroid={isAndroid}
-        />
-      </motion.div>
-    )}
+        {activeTab === 'chat' && (
+          <motion.div
+            key="chat"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ duration: 0.14, ease: 'easeOut' }}
+          >
+            <PeerChat
+              devices={cleanDevices}
+              myDeviceId={myDeviceId}
+              deviceName={deviceName}
+              chatMessages={chatMessages}
+              onSendMessage={sendChatMessage}
+              onRingDevice={ringDevice}
+              onClearChat={clearChat}
+              showToast={showToast}
+              isMac={isMac}
+              isAndroid={isAndroid}
+              isWindows={isWindows}
+              serverInfo={serverInfo}
+            />
+          </motion.div>
+        )}
 
-    {activeTab === 'tools' && (
-      <motion.div
-        key="tools"
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        exit={{ opacity: 0 }}
-        transition={{ duration: 0.12, ease: "easeOut" }}
-      >
-        <DeviceRemoteTools
-          devices={cleanDevices}
-          chatMessages={chatMessages}
-          onRingPhone={() => ringDevice('android')}
-          onPingMac={pingMac}
-          onSendMessage={sendChatMessage}
-          onOpenChat={() => handleTabChange('chat')}
-          showToast={showToast}
-        />
-      </motion.div>
-    )}
-  </AnimatePresence>
-      </main >
+        {activeTab === 'tools' && (
+          <motion.div
+            key="tools"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ duration: 0.14, ease: 'easeOut' }}
+          >
+            <DeviceRemoteTools
+              devices={cleanDevices}
+              chatMessages={chatMessages}
+              serverInfo={serverInfo}
+              onRingPhone={() => ringDevice('android')}
+              onPingMac={pingMac}
+              onSendMessage={sendChatMessage}
+              onOpenChat={() => handleTabChange('chat')}
+              showToast={showToast}
+            />
+          </motion.div>
+        )}
+      </main>
 
       {/* Modals */}
       <DevicePairingQR
@@ -1033,6 +741,8 @@ export const App: React.FC = () => {
         officePin={officePin}
         serverUrl={serverInfo?.url}
         serverInfo={serverInfo}
+        roomSettings={roomSettings}
+        onUpdateRoomSettings={updateRoomSettings}
         onConfigureSecurity={configureOfficeSecurity}
         onApproveDevice={handleApproveDevice}
         showToast={showToast}
@@ -1055,23 +765,38 @@ export const App: React.FC = () => {
       />
 
       <RingingModal
-        isOpen={isRinging}
+        isOpen={isRinging && uiPrefs.soundEnabled}
         ringSource={ringSource}
         onDismiss={dismissRing}
       />
 
-      {/* Website Custom Alert Modal: Folder Upload Confirmation */}
       <FolderBeamModal
         isOpen={!!pendingFolderUpload}
         folderName={pendingFolderUpload?.folderName || ''}
         files={pendingFolderUpload?.files || []}
         onConfirm={(selectedFiles) => {
+          const explicitTargets = pendingFolderUpload?.targetIds;
           setPendingFolderUpload(null);
-          executeUpload(selectedFiles);
+          executeUpload(selectedFiles, explicitTargets);
         }}
         onClose={() => setPendingFolderUpload(null)}
       />
+
+      <CommandPaletteModal
+        isOpen={isCommandOpen}
+        onClose={() => setIsCommandOpen(false)}
+        theme={theme}
+        files={vaultFilesList}
+        onNavigate={handleTabChange}
+        onToggleTheme={toggleTheme}
+        onOpenQR={() => setIsQrOpen(true)}
+        onOpenSecurity={() => setIsOfficeSecurityOpen(true)}
+        onRingPhone={() => ringDevice('android')}
+        onPingMac={pingMac}
+        onDownloadFile={(f) => downloadFileSafely(f.path, f.name, f.size)}
+      />
     </div>
+    </MotionConfig>
   );
 };
 export default App;

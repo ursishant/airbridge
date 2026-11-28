@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { X, Copy, Check, RefreshCw, ShieldCheck, ShieldAlert, UserCheck, UserX, Users } from 'lucide-react';
 import { copyToClipboard } from '../utils/clipboard';
+import type { RoomSettings } from '../hooks/useWebSocket';
 
 interface OfficeSecuritySettingsModalProps {
   isOpen: boolean;
@@ -10,6 +11,8 @@ interface OfficeSecuritySettingsModalProps {
   officePin: string;
   serverUrl?: string;
   serverInfo?: any;
+  roomSettings?: RoomSettings;
+  onUpdateRoomSettings?: (patch: Partial<RoomSettings>) => Promise<boolean>;
   onConfigureSecurity: (enabled: boolean, pin?: string, requireApproval?: boolean) => Promise<boolean>;
   onApproveDevice?: (deviceId: string, approved: boolean) => Promise<boolean>;
   showToast: (msg: string) => void;
@@ -75,6 +78,8 @@ export const OfficeSecuritySettingsModal: React.FC<OfficeSecuritySettingsModalPr
   officePin,
   serverUrl = '',
   serverInfo,
+  roomSettings,
+  onUpdateRoomSettings,
   onConfigureSecurity,
   onApproveDevice,
   showToast,
@@ -84,6 +89,11 @@ export const OfficeSecuritySettingsModal: React.FC<OfficeSecuritySettingsModalPr
   const [approvingId, setApprovingId] = useState<string | null>(null);
   const [isGeneratingPin, setIsGeneratingPin] = useState(false);
   const [customPin, setCustomPin] = useState(officePin || '');
+  const [customLimit, setCustomLimit] = useState<string>(String(roomSettings?.maxParticipants || 0));
+
+  useEffect(() => {
+    setCustomLimit(String(roomSettings?.maxParticipants || 0));
+  }, [roomSettings?.maxParticipants]);
 
   const requireApproval = Boolean(serverInfo?.officeSecurity?.requireApproval);
   const pendingRequests = serverInfo?.pendingApprovalRequests || [];
@@ -185,7 +195,7 @@ export const OfficeSecuritySettingsModal: React.FC<OfficeSecuritySettingsModalPr
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
           transition={{ duration: 0.18 }}
-          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xl"
+          className="bento-modal-backdrop z-50 flex items-center justify-center p-4"
           onClick={onClose}
         >
           <motion.div
@@ -194,7 +204,7 @@ export const OfficeSecuritySettingsModal: React.FC<OfficeSecuritySettingsModalPr
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.96, y: 6 }}
             transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
-            className="relative w-full max-w-md max-h-[90vh] overflow-y-auto bg-white dark:bg-[#13151B] border border-black/[0.08] dark:border-white/[0.08] rounded-3xl shadow-2xl p-6 sm:p-7 text-[#0F1115] dark:text-[#F3F4F6]"
+            className="bento-modal max-w-md max-h-[90vh] overflow-y-auto p-6 sm:p-7"
             onClick={(e) => e.stopPropagation()}
           >
             {/* Close Button */}
@@ -242,6 +252,64 @@ export const OfficeSecuritySettingsModal: React.FC<OfficeSecuritySettingsModalPr
                 ariaLabel="Toggle Office Room Protection"
               />
             </div>
+
+            {/* Room Member Limit Selector */}
+            {onUpdateRoomSettings && (
+              <div className="bento-card rounded-2xl p-4 mb-3 border border-black/[0.06] dark:border-white/[0.08] space-y-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <div>
+                    <h4 className="font-display text-sm font-bold text-[#0F1115] dark:text-white">
+                      Room People Limit
+                    </h4>
+                    <p className="text-xs text-[#64748B] dark:text-[#94A3B8]">
+                      Maximum devices allowed in this room (0 = unlimited)
+                    </p>
+                  </div>
+                  <input
+                    type="number"
+                    min={0}
+                    max={100}
+                    value={customLimit}
+                    onChange={(e) => setCustomLimit(e.target.value)}
+                    onBlur={() => {
+                      const n = parseInt(customLimit, 10);
+                      if (!isNaN(n) && n >= 0 && n <= 100 && n !== (roomSettings?.maxParticipants || 0)) {
+                        onUpdateRoomSettings({ maxParticipants: n });
+                      }
+                    }}
+                    className="bento-input w-16 text-center py-1 px-2 text-xs font-mono"
+                  />
+                </div>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {[
+                    { label: 'Unlimited', val: 0 },
+                    { label: '2', val: 2 },
+                    { label: '5', val: 5 },
+                    { label: '10', val: 10 },
+                    { label: '20', val: 20 },
+                  ].map((p) => {
+                    const active = (roomSettings?.maxParticipants || 0) === p.val;
+                    return (
+                      <button
+                        key={p.val}
+                        type="button"
+                        onClick={() => {
+                          setCustomLimit(String(p.val));
+                          onUpdateRoomSettings({ maxParticipants: p.val });
+                        }}
+                        className={`apple-press px-2.5 py-1 rounded-full text-[11px] font-mono border transition-colors ${
+                          active
+                            ? 'bg-[#111827] text-white dark:bg-[#FAFAFA] dark:text-[#111113] border-transparent font-semibold'
+                            : 'border-black/10 dark:border-white/10 text-[#64748B] dark:text-[#94A3B8]'
+                        }`}
+                      >
+                        {p.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
 
             {/* Strict Device Approval Gate (5-people group isolation) */}
             <AnimatePresence initial={false}>
@@ -415,13 +483,13 @@ export const OfficeSecuritySettingsModal: React.FC<OfficeSecuritySettingsModalPr
                       </button>
                     </div>
 
-                    <div className="flex items-center justify-between gap-3 bg-white dark:bg-[#1A1D26] px-4 py-2.5 rounded-xl border border-black/[0.08] dark:border-white/[0.08]">
+                    <div className="flex items-center justify-between gap-3 bg-white dark:bg-[#0B0F19] px-4 py-2.5 rounded-xl border border-black/[0.08] dark:border-white/[0.08]">
                       <span className="font-mono text-2xl font-black tracking-widest text-[#0F1115] dark:text-white">
                         {officePin || customPin}
                       </span>
                       <button
                         onClick={handleCopyPin}
-                        className="apple-press flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-bold bg-[#0F1115] hover:bg-black active:scale-95 text-white dark:bg-[#10B981] dark:text-[#0A0D14] transition-all"
+                        className="bento-btn-primary px-3.5 py-1.5 rounded-xl text-xs"
                       >
                         {copiedPin ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
                         <span>{copiedPin ? 'Copied' : 'Copy'}</span>
@@ -436,9 +504,9 @@ export const OfficeSecuritySettingsModal: React.FC<OfficeSecuritySettingsModalPr
                   {/* Quick Join Link Button */}
                   <button
                     onClick={handleCopyLink}
-                    className="apple-press w-full py-2.5 px-4 rounded-2xl bg-white dark:bg-[#1A1E29] border border-black/[0.08] dark:border-white/[0.08] hover:border-[#0071E3] active:scale-[0.99] text-xs font-bold text-[#0F1115] dark:text-white flex items-center justify-center gap-2 transition-all cursor-pointer"
+                    className="bento-btn-secondary w-full py-2.5 px-4 text-xs font-semibold cursor-pointer"
                   >
-                    {copiedLink ? <Check className="w-4 h-4 text-[#10B981]" /> : <Copy className="w-4 h-4 text-[#0071E3] dark:text-[#38BDF8]" />}
+                    {copiedLink ? <Check className="w-4 h-4 text-[#10B981]" /> : <Copy className="w-4 h-4 text-[#2563EB] dark:text-[#60A5FA]" />}
                     <span>{copiedLink ? 'Link Copied to Clipboard' : 'Copy Quick Join Link (Auto-PIN)'}</span>
                   </button>
                 </motion.div>

@@ -24,13 +24,24 @@ const LARGE_FILE_THRESHOLD = 16 * 1024 * 1024; // 16MB — switch to chunked str
 const MAX_CONCURRENT_BATCHES = 8; // 8 concurrent file/batch workers for LAN folder uploads
 const MAX_CONCURRENT_LARGE_FILES = 3; // Pipeline 3 large files simultaneously
 
-import { getDeviceId } from './device';
+import { getAuthHeaders } from './device';
 
-function getStoredOfficePin(): string {
-  try {
-    return localStorage.getItem('airbridge_office_pin') || '';
-  } catch (e) {
-    return '';
+export interface UploadOptions {
+  recipients?: string[];
+  maxDownloads?: number;
+  expiresMinutes?: number;
+}
+
+function appendUploadOptions(formData: FormData, options?: UploadOptions) {
+  if (!options) return;
+  if (Array.isArray(options.recipients) && options.recipients.length > 0) {
+    formData.append('recipients', JSON.stringify(options.recipients));
+  }
+  if (options.maxDownloads && options.maxDownloads > 0) {
+    formData.append('maxDownloads', String(options.maxDownloads));
+  }
+  if (options.expiresMinutes && options.expiresMinutes > 0) {
+    formData.append('expiresMinutes', String(options.expiresMinutes));
   }
 }
 
@@ -45,7 +56,8 @@ function uploadOneChunk(
   chunkIndex: number,
   totalChunks: number,
   chunkSize: number,
-  onChunkProgress: (loaded: number) => void
+  onChunkProgress: (loaded: number) => void,
+  options?: UploadOptions
 ): Promise<any> {
   const start = chunkIndex * chunkSize;
   const end = Math.min(file.size, start + chunkSize);
@@ -65,6 +77,7 @@ function uploadOneChunk(
       formData.append('relativePath', relativePath);
       formData.append('sender', sender);
       formData.append('fileSize', String(file.size));
+      appendUploadOptions(formData, options);
       formData.append('chunk', chunkBlob, file.name);
 
       const xhr = new XMLHttpRequest();
@@ -92,11 +105,9 @@ function uploadOneChunk(
       xhr.onerror = () => reject(new Error('Network error during chunk upload'));
       xhr.ontimeout = () => reject(new Error('Chunk upload timed out'));
 
-      const pin = getStoredOfficePin();
-      if (pin) {
-        xhr.setRequestHeader('x-airbridge-pin', pin);
-      }
-      xhr.setRequestHeader('x-airbridge-device-id', getDeviceId());
+      Object.entries(getAuthHeaders()).forEach(([key, val]) => {
+        xhr.setRequestHeader(key, val);
+      });
 
       xhr.send(formData);
     });
@@ -123,7 +134,8 @@ function uploadOneChunk(
 async function uploadSingleFileChunked(
   item: TraversedFile,
   sender: string,
-  onChunkProgress: (totalLoadedBytes: number, totalChunks: number) => void
+  onChunkProgress: (totalLoadedBytes: number, totalChunks: number) => void,
+  options?: UploadOptions
 ): Promise<any> {
   const file = item.file;
   const chunkSize = getOptimalChunkSize(file.size);
@@ -152,7 +164,8 @@ async function uploadSingleFileChunked(
           let totalLoaded = 0;
           for (let j = 0; j < totalChunks; j++) totalLoaded += chunkLoaded[j];
           onChunkProgress(totalLoaded, totalChunks);
-        }
+        },
+        options
       );
       const thisChunkSize = Math.min(chunkSize, file.size - idx * chunkSize);
       chunkLoaded[idx] = thisChunkSize;
@@ -176,13 +189,15 @@ async function uploadSingleFileChunked(
 function uploadSmallBatch(
   batch: TraversedFile[],
   sender: string,
-  onProgress: (loaded: number) => void
+  onProgress: (loaded: number) => void,
+  options?: UploadOptions
 ): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     const formData = new FormData();
     const paths = batch.map((item) => item.relativePath);
     formData.append('paths', JSON.stringify(paths));
     formData.append('sender', sender);
+    appendUploadOptions(formData, options);
     batch.forEach(({ file, relativePath }) => {
       formData.append('files', file, relativePath);
     });
@@ -208,11 +223,9 @@ function uploadSmallBatch(
     xhr.onerror = () => reject(new Error('Network error during batch upload'));
     xhr.ontimeout = () => reject(new Error('Batch upload timed out'));
 
-    const pin = getStoredOfficePin();
-    if (pin) {
-      xhr.setRequestHeader('x-airbridge-pin', pin);
-    }
-    xhr.setRequestHeader('x-airbridge-device-id', getDeviceId());
+    Object.entries(getAuthHeaders()).forEach(([key, val]) => {
+      xhr.setRequestHeader(key, val);
+    });
 
     xhr.send(formData);
   });
@@ -227,7 +240,8 @@ function uploadSmallBatch(
 export async function uploadFilesSmartly(
   items: TraversedFile[],
   sender: string,
-  onProgress: (info: UploadProgressInfo) => void
+  onProgress: (info: UploadProgressInfo) => void,
+  options?: UploadOptions
 ): Promise<boolean> {
   if (!items || items.length === 0) return false;
 
@@ -249,7 +263,7 @@ export async function uploadFilesSmartly(
         totalFiles: 1,
         speedMBs,
       });
-    });
+    }, options);
 
     onProgress({
       percent: 100,
@@ -320,7 +334,7 @@ export async function uploadFilesSmartly(
         try {
           await uploadSingleFileChunked(item, sender, (loadedBytes, totalChunks) => {
             updateProgress(loadedBytes, `${item.file.name} (${totalChunks} parallel chunks)`, completedLargeCount + 1);
-          });
+          }, options);
         } catch (err) {
           console.warn(`Failed to upload ${item.file.name}, continuing rest of batch:`, err);
         }
@@ -355,7 +369,7 @@ export async function uploadFilesSmartly(
               batchLoaded = loaded;
               const display = batch.length === 1 ? batch[0].file.name : `Batch ${id + 1} (${batch.length} files)`;
               updateProgress(batchLoaded, display, largeFiles.length + id + 1);
-            });
+            }, options);
             break;
           } catch (err) {
             console.warn(`Batch ${id + 1} attempt ${batchAttempts} failed:`, err);
