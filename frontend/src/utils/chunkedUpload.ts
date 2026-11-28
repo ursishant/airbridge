@@ -20,7 +20,7 @@ export function getOptimalChunkSize(fileSize: number): number {
 }
 
 const MAX_PARALLEL_CHUNKS = 6; // 6 concurrent socket uploads per file
-const LARGE_FILE_THRESHOLD = 16 * 1024 * 1024; // 16MB — switch to chunked streaming
+const LARGE_FILE_THRESHOLD = 16 * 1024 * 1024; // 16MB - switch to chunked streaming
 const MAX_CONCURRENT_BATCHES = 8; // 8 concurrent file/batch workers for LAN folder uploads
 const MAX_CONCURRENT_LARGE_FILES = 3; // Pipeline 3 large files simultaneously
 

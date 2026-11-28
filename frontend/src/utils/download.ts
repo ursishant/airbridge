@@ -189,7 +189,7 @@ export async function downloadFileSafely(
   }
 
   // Tier 1: File System Access API (Desktop Chrome / Edge / Opera)
-  // Direct chunk-by-chunk disk write with 0MB heap memory — best for giant multi-gigabyte files!
+  // Direct chunk-by-chunk disk write with 0MB heap memory - best for giant multi-gigabyte files!
   if (typeof window !== 'undefined' && 'showSaveFilePicker' in window && fileSize && fileSize >= PARALLEL_MAX_BUFFER_SIZE) {
     try {
       const handle = await (window as any).showSaveFilePicker({

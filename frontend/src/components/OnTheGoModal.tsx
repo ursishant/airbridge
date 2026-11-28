@@ -209,7 +209,7 @@ export const OnTheGoModal: React.FC<OnTheGoModalProps> = ({
                         <p className="font-semibold text-[#10B981]">Android Personal Hotspot (Recommended)</p>
                         <p>1. On your Android phone, turn on <strong>Personal Hotspot</strong>.</p>
                         <p>2. Connect your Mac to your phone's Wi-Fi network.</p>
-                        <p>3. Open AirBridge — everything works at full speed, even with zero cellular data!</p>
+                        <p>3. Open AirBridge: everything works at full speed, even with zero cellular data!</p>
                       </div>
                     </div>
                   </div>

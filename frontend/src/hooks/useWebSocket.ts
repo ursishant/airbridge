@@ -289,7 +289,7 @@ export function useWebSocket() {
         } catch (e) {}
 
         // /api/battery reports the HOST machine, so only fetch it when this page
-        // is opened on the host itself — never from a remote LAN browser.
+        // is opened on the host itself, never from a remote LAN browser.
         const isHostPage = ['localhost', '127.0.0.1', '::1'].includes(window.location.hostname);
         if (!batteryInfo && (isMac || isWindows) && isHostPage) {
           try {

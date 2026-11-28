@@ -272,7 +272,7 @@ export const FileTransfer: React.FC<FileTransferProps> = ({
 
   return (
     <div className="w-full space-y-4">
-      {/* Header Row — shows item count + total size cleanly on mobile & desktop */}
+      {/* Header Row: shows item count + total size cleanly on mobile & desktop */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-1 min-w-0">
           <h3 className="font-display text-sm font-bold tracking-tight" style={{ color: 'var(--text-primary)' }}>

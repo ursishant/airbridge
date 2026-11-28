@@ -228,7 +228,7 @@ export const AirDropRadar: React.FC<AirDropRadarProps> = ({
           <p className="text-xs sm:text-sm mt-1.5 text-center max-w-md" style={{ color: 'var(--text-tertiary)' }}>
             {uploadsDisabled
               ? 'You can still browse and download shared files below'
-              : 'or use the buttons below — direct LAN transfer up to 10 GB'}
+              : 'or use the buttons below · direct LAN transfer up to 10 GB'}
           </p>
 
           {!uploadsDisabled && (

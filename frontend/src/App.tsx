@@ -605,7 +605,7 @@ export const App: React.FC = () => {
           </div>
         </div>
 
-        {/* Tab Views — immediate mount with crisp fade (no blank wait frame) */}
+        {/* Tab Views: immediate mount with crisp fade (no blank wait frame) */}
         {activeTab === 'files' && (
           <motion.div
             key="files"

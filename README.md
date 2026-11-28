@@ -23,13 +23,17 @@
 
 <br />
 
-| Dark Mode (Obsidian & Electric Lime) | Light Mode (Clean Bento) |
+| Dark Mode (Dynamic Island & Center Stage) | Light Mode (Adaptive Dynamic Island) |
 |:---:|:---:|
 | ![Dark Mode Dashboard](docs/screenshots/desktop-dark.png) | ![Light Mode Dashboard](docs/screenshots/desktop-light.png) |
 
-| Direct LAN Peer Chat | Office Wi-Fi Security & PIN Shield |
+| Dynamic Island (Room Limits & Controls) | Office Wi-Fi Security & PIN Shield |
 |:---:|:---:|
-| ![Peer Chat](docs/screenshots/chat-dark.png) | ![Office Wi-Fi Security Shield](docs/screenshots/office-security-modal.png) |
+| ![Expanded Dynamic Island](docs/screenshots/dynamic-island-expanded.png) | ![Office Wi-Fi Security Shield](docs/screenshots/office-security-modal.png) |
+
+| Direct LAN Peer Chat |
+|:---:|
+| <img src="docs/screenshots/chat-dark.png" width="760" alt="Direct LAN Peer Chat" /> |
 
 </div>
 
@@ -60,19 +64,23 @@ AirBridge solves this friction. It runs a native host daemon on Windows, macOS, 
 - **Vault Archive & Bulk Deletion**: Grid and list views with file previews, on-demand ZIP archive compilation, single-file downloads, and multi-file bulk deletion with select-all bar.
 - **Native OS Reveal**: Click Explorer on Windows or Finder on macOS to highlight files directly in their folder.
 
-### 2. Office Wi-Fi Security, Room PIN & Host Approval Whitelist
+### 2. Dynamic Island Hub, Room Limits & Full Customization
+- **Theme-Adaptive Floating Dynamic Island**: Smoothly switches between a crisp frosted white capsule in Light Mode and deep obsidian in Dark Mode, expanding into a tabbed control hub (`Overview`, `Room & Limit`, `Customize`) and showing live upload progress and toast notifications.
+- **Customizable Room Capacity**: Hosts can rename the room, set an exact people limit (`Unlimited` or `1` to `100` participants) enforced over WebSocket and HTTP, kick devices, and toggle room-wide File Uploads, Clipboard Sync, or Peer Chat permissions in real time.
+- **UI Personalization**: Live accent color switcher, Light/Dark mode, confetti toggle, alert sound mute, drop-zone density, and a `Cmd+K` / `Ctrl+K` Command Palette.
+
+### 3. Office Wi-Fi Security, Room PIN & Host Approval Whitelist
 - **Subnet Privacy**: Protects your shared files and clipboard from unauthorized devices on shared office or co-working Wi-Fi networks.
-- **4-Digit Room PIN**: Host machines can enable Room PIN protection with one click.
-- **Host Approval Whitelist (Group Isolation)**: When working in a large office, restrict file visibility and downloads strictly to an approved group (e.g., 5 team members) via live 1-click host approval.
-- **Zero-Friction Camera Pairing**: The host pairing QR code automatically embeds the secure PIN token, allowing mobile cameras to authenticate seamlessly upon scanning.
-- **Progressive Brute-Force Rate Limiting**: Exponential lockout on authentication endpoints completely blocks automated subnet probing.
+- **4-Digit Room PIN & HMAC Sessions**: Constant-time PIN verification (`crypto.timingSafeEqual`) with cryptographic HMAC-signed session cookies (`httpOnly`, `sameSite=strict`) and per-boot host secret validation.
+- **Host Approval Whitelist & Targeted Peer Sharing**: Restrict access to manually approved colleagues, isolate individual file transfers to selected peers with download quotas/expiry, and prevent device-ID spoofing across LAN IPs.
+- **Progressive Brute-Force Rate Limiting**: Exponential lockout on PIN and WebSocket upgrade endpoints mitigates automated subnet probing.
 
-### 3. Universal Live Clipboard & Two-Way Messaging
+### 4. Universal Live Clipboard, Peer Chat & Quick Look
 - **Instant Clipboard Sync**: Text, URLs, code snippets, or tokens copied on any connected device sync immediately via WebSockets.
-- **Peer Chat 2.0**: Two-column bento messenger with hardware telemetry (peer device presence, latency metrics, battery levels) and link preview cards.
-- **Remote URL Launch**: Beam any web address from your mobile device to open directly in your computer default browser.
+- **Direct LAN Peer Chat**: Focused messaging stream with peer online status, Ring/Ping controls, copyable snippets, and remote URL link cards.
+- **Quick Look Previews**: In-browser preview modal for images (with zoom), video, audio, PDFs, and source code/text files, plus sandboxed raw file headers (`nosniff`, `sandbox` CSP for HTML/SVG).
 
-### 4. Hardware Remote Tools
+### 5. Hardware Remote Tools
 - **Find My Phone**: Trigger haptic vibration patterns on connected Android devices.
 - **Host Ping Alert**: Send an acoustic chime to your host computer (using Windows console tone or macOS alert).
 - **Battery Telemetry**: Real-time host battery reporting via Windows CIM (`Win32_Battery`) and macOS `pmset`.
@@ -251,9 +259,10 @@ If you ever wish to stop or completely remove AirBridge from your system:
 
 | Key | Function |
 |:---|:---|
+| `Cmd + K` / `Ctrl + K` | Open Command Palette |
 | `Enter` | Send message in Peer Chat |
-| `Escape` | Close any active modal dialog |
-| `Ctrl + V` / `Command + V` | Paste and beam clipboard directly |
+| `Escape` | Close active modal or collapse Dynamic Island |
+| `Ctrl + Enter` / `Cmd + Enter` | Sync clipboard text |
 
 ---
 

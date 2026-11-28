@@ -267,7 +267,7 @@ function createOfficeRouter(options) {
     });
   });
 
-  // Update customizable Room Settings (Room Name, Member Limit, Permissions) — strictly host-only
+  // Update customizable Room Settings (Room Name, Member Limit, Permissions) - strictly host-only
   router.post('/room-settings', async (req, res) => {
     if (!isHostRequest(req)) {
       return res.status(403).json({ error: 'Only the host machine can customize room settings' });
