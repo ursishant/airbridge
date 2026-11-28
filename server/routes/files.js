@@ -120,17 +120,6 @@ function createFilesRouter(options) {
     };
   }
 
-  function saveTargetedMetadata(storedKey, reqBody, fallbackKey = null) {
-    const meta = parseTargetedOptions(reqBody);
-    if (!meta || !stateStore.setTargetedFile) return false;
-    stateStore.setTargetedFile(storedKey, meta);
-    if (fallbackKey && fallbackKey !== storedKey) {
-      stateStore.setTargetedFile(fallbackKey, meta);
-    }
-    stateStore.save();
-    return Boolean(meta.recipientIds.length > 0);
-  }
-
   function getDownloadGrantKey(req, targetKey) {
     const devId = getClientDeviceId(req) || getNormalizedRemoteAddress(req) || 'anon';
     return `${devId}|${targetKey}`;
@@ -291,7 +280,15 @@ function createFilesRouter(options) {
 
     const totalUploadedSize = req.files.reduce((acc, f) => acc + (f.size || 0), 0);
     if (!hasSufficientDiskSpace(totalUploadedSize)) {
-      req.files.forEach((f) => { try { fs.unlinkSync(f.path); } catch (_) {} });
+      const safeUploadsDir = path.resolve(UPLOADS_DIR);
+      req.files.forEach((f) => {
+        if (!f || !f.path) return;
+        const resolvedPath = path.resolve(f.path);
+        const rel = path.relative(safeUploadsDir, resolvedPath);
+        if (rel && !rel.startsWith('..') && !path.isAbsolute(rel) && resolvedPath.startsWith(safeUploadsDir + path.sep)) {
+          try { if (fs.existsSync(resolvedPath)) fs.unlinkSync(resolvedPath); } catch (_) {}
+        }
+      });
       return res.status(507).json({ error: 'Insufficient disk space on host storage' });
     }
 
@@ -793,7 +790,13 @@ function createFilesRouter(options) {
       }
 
       if (!hasSufficientDiskSpace(req.file.size || 0)) {
-        try { fs.unlinkSync(req.file.path); } catch (_) {}
+        const safeUploadsDir = path.resolve(UPLOADS_DIR);
+        const snapFileName = path.basename(req.file ? (req.file.path || req.file.filename || '') : '');
+        const safeSnapPath = path.resolve(safeUploadsDir, snapFileName);
+        const isSnapValid = snapFileName.length > 0 && safeSnapPath.startsWith(safeUploadsDir + path.sep);
+        if (isSnapValid && fs.existsSync(safeSnapPath)) {
+          try { fs.unlinkSync(safeSnapPath); } catch (_) {}
+        }
         return res.status(507).json({ error: 'Insufficient disk space on host storage' });
       }
 

@@ -1,8 +1,7 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
-const http = require('http');
 const { WebSocket } = require('ws');
-const { app, server, stateStore } = require('../index');
+const { server, stateStore } = require('../index');
 
 describe('Customizable Room Settings & Member Limit Enforcement', () => {
   it('enforces host-only /api/office/room-settings and WebSocket maxParticipants cap', async () => {
